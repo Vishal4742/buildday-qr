@@ -1,0 +1,26 @@
+name = "buildday"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+preview_urls = false # no per-version side doors: the deployed version is the only one anybody can reach
+
+# Your own domain. It has to be active in this Cloudflare account first (README, "Your own domain").
+# Step 1: uncomment `routes`, deploy, and check the new address works.
+# Step 2: uncomment `workers_dev`, deploy again. From then on the domain, with Cloudflare's firewall in front, is the only way in.
+# routes = [{ pattern = "claim.withclaude.in", custom_domain = true }]
+# workers_dev = false
+
+[vars]
+ROTATE_SECONDS = 20         # the QR swaps this often even when nobody scans it
+TTL_SECONDS = 120           # a code dies this long after it first appeared; has to cover scanning plus typing an email on a phone
+MAX_CLAIMS_PER_MINUTE = 30  # a desk manages about ten. Faster than this is a script working through other people's emails
+
+[[durable_objects.bindings]]
+name = "GATE"
+class_name = "Gate"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Gate"]
+
+[observability]
+enabled = true
