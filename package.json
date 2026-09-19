@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy && npm run deploy:pages",
+    "deploy:pages": "cd pages && wrangler pages deploy --branch main --commit-dirty=true",
     "test": "node test.mjs"
   },
   "dependencies": {

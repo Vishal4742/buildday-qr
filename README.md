@@ -25,9 +25,28 @@ The display has no password. Opening the display link signs that browser in for 
 
 ## Your own domain
 
-Worth doing for three reasons. Attendees see your name instead of `workers.dev`. Some Indian mobile networks have blocked `workers.dev` addresses in the past. And a domain puts Cloudflare's firewall in front of the Worker, which a `workers.dev` address can't have.
+Worth doing for two reasons. Attendees see your name instead of `workers.dev` when their camera reads the code, and developers notice that. And some Indian mobile networks have blocked `workers.dev` addresses in the past.
 
-The domain has to be in your Cloudflare account. If you bought it somewhere else (GoDaddy, Hostinger, Namecheap, BigRock), move its nameservers over first. It's free and you keep the domain where it is.
+There are two ways to get there. Pick by how busy your domain already is.
+
+### The quick way: one CNAME record, wherever your DNS lives
+
+Use this if your domain already runs mail or other sites and you don't want to touch any of that. Your DNS stays at Spaceship, GoDaddy, Hostinger or wherever it is.
+
+Cloudflare Workers only accept domains that Cloudflare manages. Cloudflare Pages accepts a subdomain from any DNS provider. So the repo ships a second front door in `pages/`. It is the same gate code and it talks to the same Durable Object, so both entrances share one set of data.
+
+1. Create the Pages project once: `npx wrangler pages project create buildday-qr --production-branch main --force`. Run it from an empty folder, not from this repo. Without `--force`, current wrangler versions turn this command into "deploy the current folder as a new Worker", which is not what you want. The flag is only needed this one time.
+2. Give it the same two keys: `npx wrangler pages secret put ADMIN_KEY --project-name buildday-qr`, and the same for `DISPLAY_KEY`.
+3. `npm run deploy` now updates both entrances, the Worker first because it owns the data.
+4. In the Cloudflare dashboard open Workers & Pages, `buildday-qr`, Custom domains, "Set up a custom domain". Type the address you want, for example `claim.yourdomain.com`. Do this before the next step. Cloudflare says a CNAME added first will not resolve.
+5. At your DNS provider add a CNAME record. Host: `claim`. Value: `buildday-qr.pages.dev`. If you added this record before step 4, nothing is lost. It just won't resolve until step 4 is done.
+6. Wait for the dashboard to show the domain as active, usually a few minutes. Then run `node urls.mjs https://claim.yourdomain.com <ADMIN_KEY> <DISPLAY_KEY>` for your new admin address and display link. Only the front part changes.
+
+Three things to know. Every key now lives in two places, so change it in both or the two entrances disagree: `npx wrangler secret put DISPLAY_KEY` and `npx wrangler pages secret put DISPLAY_KEY --project-name buildday-qr`. Pages keeps every old deployment reachable at its own `<hash>.buildday-qr.pages.dev` address. After a deploy that fixes something in the gate, delete the older ones with `npx wrangler pages deployment list --project-name buildday-qr` and `npx wrangler pages deployment delete <id> --project-name buildday-qr`, or stale gate code stays reachable. And this route gives you no Cloudflare firewall rule, because that needs the whole domain on Cloudflare. Classic Pages is also the older of Cloudflare's two platforms, so treat this as the route for the event and look at the next one afterwards.
+
+### The thorough way: move the domain's nameservers to Cloudflare
+
+This puts Cloudflare's firewall in front and lets you turn the `workers.dev` address off. It also touches the DNS for everything else on the domain, so don't start it right before an event. It's free and you keep the domain where it is.
 
 1. In the Cloudflare dashboard choose "Add a domain", type your domain, and pick the Free plan.
 2. Cloudflare copies your existing DNS records. Stop and check them if the domain already runs a website or email. Every record on your registrar's DNS page should be in Cloudflare's list, the MX records for mail above all. Add any that are missing. Skipping this is how people break their email.
