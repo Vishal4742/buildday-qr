@@ -1,0 +1,2 @@
+# Hooks run through Git Bash. A CRLF checkout on Windows breaks them with ": command not found".
+*.sh text eol=lf
