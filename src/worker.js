@@ -8,7 +8,7 @@ const PATH_LEN = 20; // hex characters in the secret admin and display paths, 80
 const REFUSED = 'That email can\'t be used to claim. Check the spelling and use the one you registered with, or talk to an organizer.';
 
 // Two layers. This stateless Worker is the only thing the internet can reach. Whatever needs no data (wrong paths,
-// wrong methods, oversized bodies, failed logins) it answers by itself, so junk never reaches the Durable Object
+// wrong methods, oversized bodies, cross-site posts) it answers by itself, so junk never reaches the Durable Object
 // behind it, which is single-threaded and holds all the state. Every decision about a claim is made back there.
 // ponytail: one object for the whole event, fine for hundreds of scans a minute. Shard per desk if that ever isn't enough.
 // ponytail: no per-IP rate limit on purpose. At a venue everyone shares one Wi-Fi address, so a limit would let one
@@ -46,16 +46,10 @@ export default {
     }
     if (!role) return notFound();
 
-    if (role === 'admin') {
-      const given = basicPassword(req);
-      if (!(await same(given ?? '', env.ADMIN_KEY))) {
-        // Someone who knows the secret path but not the key is worth noticing. Shows up in `npx wrangler tail`.
-        if (given !== null) console.warn(`wrong admin key from ${req.headers.get('CF-Connecting-IP')}`);
-        return plain('Login required', 401, { 'WWW-Authenticate': 'Basic realm="admin", charset="UTF-8"' });
-      }
-      // The browser attaches Basic auth to cross-site form posts too, so a hostile page could otherwise reset the pool.
-      if (post && req.headers.get('Origin') !== url.origin) return plain('Bad origin', 403);
-    }
+    // Reaching the admin area is not being logged in. The object checks the ID and password on every admin request,
+    // because the organizer's own login is stored there. What the gate still owns is the cross-site check: the browser
+    // attaches Basic auth to cross-site form posts too, so a hostile page could otherwise reset the pool.
+    if (role === 'admin' && post && req.headers.get('Origin') !== url.origin) return plain('Bad origin', 403);
 
     // A claim posts one email address. Only the admin ever sends anything long.
     const body = post ? await readCapped(req.body, role === 'admin' ? 2_000_000 : 10_000) : undefined;
@@ -68,7 +62,13 @@ export default {
       method: req.method,
       body,
       redirect: 'manual', // hand the object's 303s back to the browser instead of chasing them in here
-      headers: { 'X-Role': role, 'X-Base': `/${seg}`, Cookie: req.headers.get('Cookie') ?? '' },
+      headers: {
+        'X-Role': role,
+        'X-Base': `/${seg}`,
+        'X-Ip': req.headers.get('CF-Connecting-IP') ?? '',
+        Cookie: req.headers.get('Cookie') ?? '',
+        Authorization: role === 'admin' ? req.headers.get('Authorization') ?? '' : '', // the login only ever travels to the admin area
+      },
     }));
   },
 };
@@ -76,6 +76,7 @@ export default {
 export class Gate extends DurableObject {
   tokens = new Map(); // token -> { at, seen, tries }. Memory only: if the object restarts, people just scan again.
   recent = []; // when the last minute's successful claims happened
+  okLogin = ''; // the last Authorization header that checked out, so the slow password hash runs once and not per click
   cur = '';
   svg = '';
 
@@ -89,6 +90,80 @@ export class Gate extends DurableObject {
     this.sql.exec('CREATE TABLE IF NOT EXISTS emails (email TEXT PRIMARY KEY)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS claims (cid TEXT PRIMARY KEY, link_id INTEGER NOT NULL, at INTEGER NOT NULL, email TEXT)');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS claims_email ON claims (email)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)'); // the organizer's own login and its lockout
+  }
+
+  kv(key) {
+    return this.sql.exec('SELECT value FROM kv WHERE key = ?', key).toArray()[0]?.value ?? '';
+  }
+
+  kvSet(key, value) {
+    this.sql.exec('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
+  }
+
+  // Returns true, or the response to send instead. Two ways in. The ADMIN_KEY always works as the password, with any
+  // ID: it is how the first login happens and how a forgotten password is recovered, and because it is checked first
+  // and needs nothing from storage, nothing that goes wrong further down can lock the organizer out. The second way is
+  // the ID and password the organizer set in the panel. That one is a human's password, so five wrong tries lock it
+  // for five minutes. The key is 100 random bits and needs no such brake.
+  async login(req) {
+    const header = req.headers.get('Authorization') ?? '';
+    const ask = (status, text) => plain(text, status, { 'WWW-Authenticate': 'Basic realm="admin", charset="UTF-8"' });
+    const encoded = header.match(/^Basic (.+)$/)?.[1];
+    if (!encoded) return ask(401, 'Login required');
+    if (this.okLogin && (await same(header, this.okLogin))) return true;
+
+    let id = '', password = '';
+    try {
+      const text = atob(encoded);
+      const colon = text.indexOf(':');
+      id = colon < 0 ? '' : text.slice(0, colon);
+      password = text.slice(colon + 1);
+    } catch {
+      return ask(401, 'Login required');
+    }
+    if (this.env.ADMIN_KEY && (await same(password, this.env.ADMIN_KEY))) {
+      this.okLogin = header; // and deliberately nothing else: this branch must not depend on storage
+      return true;
+    }
+
+    const hash = this.kv('admin_hash');
+    if (hash && Date.now() < Number(this.kv('login_locked_until'))) {
+      return ask(429, 'Too many wrong passwords. Wait five minutes, or log in with the admin key as the password.');
+    }
+    // Both comparisons always run, so a wrong ID and a wrong password take the same time.
+    const idOk = hash ? await same(id, this.kv('admin_id')) : false;
+    const passwordOk = hash ? await same(await slowHash(password, this.kv('admin_salt')), hash) : false;
+    if (idOk && passwordOk) {
+      this.okLogin = header;
+      this.kvSet('login_failures', 0);
+      return true;
+    }
+    // Someone who knows the secret path but not the login is worth noticing. Shows up in `npx wrangler tail`.
+    console.warn(`wrong admin login from ${req.headers.get('X-Ip')}`);
+    const failures = Number(this.kv('login_failures')) + 1;
+    this.kvSet('login_failures', failures >= 5 ? 0 : failures);
+    if (failures >= 5) this.kvSet('login_locked_until', Date.now() + 5 * 60_000);
+    return ask(401, 'Login required');
+  }
+
+  async setLogin(form) {
+    const id = String(form.get('id') ?? '').trim();
+    const password = String(form.get('password') ?? '');
+    // Plain ASCII only: the browser's login box and atob() disagree about anything else. No colon in the ID,
+    // because "id:password" is how the browser sends the pair.
+    if (!/^[\x21-\x39\x3b-\x7e]{3,40}$/.test(id)) return '?note=badid#account';
+    if (!/^[\x20-\x7e]{10,200}$/.test(password) || password === id) return '?note=badpw#account';
+    if (password !== String(form.get('again') ?? '')) return '?note=mismatch#account';
+    const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+    const hash = await slowHash(password, salt);
+    this.kvSet('admin_id', id);
+    this.kvSet('admin_salt', salt);
+    this.kvSet('admin_hash', hash);
+    this.kvSet('login_failures', 0);
+    this.kvSet('login_locked_until', 0);
+    this.okLogin = '';
+    return '?note=login#account';
   }
 
   async fetch(req) {
@@ -96,7 +171,7 @@ export class Gate extends DurableObject {
     const path = url.pathname;
     const post = req.method === 'POST';
     // A Durable Object has no public address. Only the Worker above can call this, and it builds these headers
-    // itself after checking the key, so they can be trusted. Every SQL statement below binds its values with ?.
+    // itself, so X-Role can be trusted to say which area was reached. Every SQL statement below binds its values with ?.
     const role = req.headers.get('X-Role');
     const base = req.headers.get('X-Base');
     // Read the body up front so that scan() never has to await.
@@ -113,8 +188,12 @@ export class Gate extends DurableObject {
     }
 
     if (role === 'admin') {
+      // X-Role: admin only says the request reached the admin area. Being logged in is decided here, every time.
+      const allowed = await this.login(req);
+      if (allowed !== true) return allowed;
       const back = (query = '') => Response.redirect(`${url.origin}${base}${query}`, 303);
       if (path === '/_admin/export.csv') return this.exportCsv();
+      if (post && path === '/_admin/login') return back(await this.setLogin(form));
       if (post && path === '/_admin') return back(this.addLinks(form));
       if (post && path === '/_admin/link') return back(this.editLink(form));
       if (post && path === '/_admin/emails') return back(this.addEmails(form));
@@ -270,6 +349,10 @@ export class Gate extends DurableObject {
     // Only fixed strings and parsed numbers reach the page, never text from the query string. hasOwn, because a
     // plain lookup would happily return Object.prototype members for ?note=constructor.
     const notes = { saved: 'Link saved.', deleted: 'Link deleted.', removed: 'Email removed from the approved list.',
+      login: 'New login saved. If the browser asks you to log in again, use the new ID and password.',
+      badid: 'Not saved: the ID needs 3 to 40 letters, digits or symbols, with no spaces and no colon.',
+      badpw: 'Not saved: the password needs at least 10 characters, plain letters, digits and symbols, and must differ from the ID.',
+      mismatch: 'Not saved: the two passwords were not the same.',
       badlink: 'Not saved: that isn\'t a valid URL, or it is too long.',
       duplicate: 'Not saved: another line already has that exact link or code.' };
     const key = url.searchParams.get('note');
@@ -317,10 +400,25 @@ export class Gate extends DurableObject {
         <button>Save emails</button>
       </form>
       <p><a href="${base}/export.csv">Download the list with claim status</a> <span class="dim">(CSV, opens in Excel)</span></p>
+      <label for="find">Find an attendee</label>
+      <input id="find" type="search" placeholder="type any part of an email" autocomplete="off">
       <form method="post" action="${base}/email-remove">
-      <table><tr><th>Attendee</th><th>Got</th><th>At</th><th></th></tr>
-      ${this.people().map((r) => `<tr><td>${esc(r.email)}</td><td>${r.val ? esc(r.val) : '<span class="dim">not yet</span>'}</td><td>${r.at ? ist(r.at) : ''}</td>
+      <table id="people-table"><tr><th>Attendee</th><th>Got</th><th>At</th><th></th></tr>
+      ${this.people().map((r) => `<tr data-email="${esc(r.email)}"><td>${esc(r.email)}</td><td>${r.val ? esc(r.val) : '<span class="dim">not yet</span>'}</td><td>${r.at ? ist(r.at) : ''}</td>
         <td>${r.at ? '' : `<button class="link" name="email" value="${esc(r.email)}">remove</button>`}</td></tr>`).join('')}</table>
+      </form>
+
+      <h2 id="account">Admin login</h2>
+      <p>${this.kv('admin_hash') ? `Your ID is <b>${esc(this.kv('admin_id'))}</b>.` : 'No ID and password set yet. You are in with the admin key.'}</p>
+      <form method="post" action="${base}/login">
+        <label for="aid">New admin ID</label>
+        <input id="aid" name="id" required minlength="3" maxlength="40" autocomplete="username" autocapitalize="none" spellcheck="false">
+        <label for="apw">New password, 10 characters or more</label>
+        <input id="apw" name="password" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
+        <label for="apw2">The same password again</label>
+        <input id="apw2" name="again" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
+        <p class="dim">The address of this page stays the same. Forgot the password one day? The long admin key always works as the password, with any ID. Five wrong passwords lock the ID and password for five minutes. The admin key is never locked.</p>
+        <button>Save login</button>
       </form>
 
       <h2>Danger zone</h2>
@@ -389,6 +487,10 @@ ${xlsxText}
 for (const el of document.querySelectorAll('[data-confirm]')) {
   el.addEventListener(el.tagName === 'FORM' ? 'submit' : 'click', (e) => { if (!confirm(el.dataset.confirm)) e.preventDefault(); });
 }
+document.getElementById('find').addEventListener('input', (e) => {
+  const wanted = e.target.value.trim().toLowerCase();
+  for (const row of document.querySelectorAll('#people-table tr[data-email]')) row.hidden = !row.dataset.email.includes(wanted);
+});
 document.getElementById('file').addEventListener('change', async (e) => {
   const file = e.target.files[0], note = document.getElementById('filenote');
   if (!file) return;
@@ -556,11 +658,12 @@ const secretPath = async (label, key) => hex(await sha256(`${label}-path:${key}`
 // What a signed-in display browser holds. Also derived from DISPLAY_KEY, so changing that key signs every screen out.
 const screenCookie = async (key) => hex(await sha256(`display-cookie:${key}`));
 
-// null means no credentials were sent at all, so a first visit isn't logged as a failed attempt.
-function basicPassword(req) {
-  const b64 = req.headers.get('Authorization')?.match(/^Basic (.+)$/)?.[1];
-  if (!b64) return null;
-  try { return atob(b64).replace(/^[^:]*:/, ''); } catch { return ''; }
+// For the organizer's own password. It is a human's password, quite possibly one they use elsewhere, so it is stored
+// as PBKDF2 with 100,000 rounds (the most Workers allow) and a random salt, never as a fast hash.
+async function slowHash(password, saltHex) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const salt = Uint8Array.from(saltHex.match(/../g) ?? [], (pair) => parseInt(pair, 16));
+  return hex(new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100_000 }, key, 256)));
 }
 
 // Counts what actually arrives: Content-Length can be missing, and it can lie. null means over the limit.

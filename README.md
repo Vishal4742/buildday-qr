@@ -25,9 +25,15 @@ The display has no password. Opening the display link signs that browser in for 
 
 ## Getting in, and changing a key
 
-Open your admin address, the one `urls.mjs` printed. The browser shows a login box. Type anything as the username and your `ADMIN_KEY` as the password. There is no login page to find anywhere else, and that is on purpose.
+Open your admin address, the one `urls.mjs` printed. The browser shows a login box. The first time, type anything as the username and your `ADMIN_KEY` as the password. There is no login page to find anywhere else, and that is on purpose.
 
-To change a key, run one command from the repo folder, in your own terminal:
+Then scroll to "Admin login" at the bottom of the panel and set your own ID and password. From then on you log in with those. Three things to know:
+
+- The address of the panel does not change when you change your ID or password.
+- The `ADMIN_KEY` keeps working as the password, with any ID. That is how you get back in if you forget yours, so nobody can lock you out.
+- Five wrong passwords lock the ID and password for five minutes. The `ADMIN_KEY` is never locked. Your password is stored as a salted PBKDF2 hash, never as text.
+
+You only need the command line for the keys themselves, for example after a leak. Run one command from the repo folder, in your own terminal:
 
 ```
 node rotate.mjs admin https://claim.yourdomain.com       # new admin password

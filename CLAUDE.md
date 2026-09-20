@@ -18,6 +18,7 @@ A check-in gate that hands out sponsor credits at a developer event (Fable 5.1 B
 ## Conventions
 - Plain JavaScript ES modules on Cloudflare Workers. One source file, `src/worker.js`. One runtime dependency, bundled at deploy time. No CDN scripts, no build step beyond wrangler.
 - Two layers. The outer Worker is the gate: routing, admin auth, Origin check, body caps, and every answer that needs no data. The Durable Object `Gate` holds all state and makes every claim decision. It trusts `X-Role` / `X-Base` only because the gate builds that request from scratch.
+- Admin login lives in the Durable Object (`login()`), not in the gate. The `ADMIN_KEY` branch comes first and must never depend on storage: it is the organizer's way back in. `test.mjs` does not cover the custom ID and password or the lockout yet (see `notes/phase-3.md`). Write and run those tests before touching `login()` again.
 - `scan()` must stay free of `await`. That is what makes check, assign and burn one atomic step.
 - `findEmails` and `xlsxText` are injected into the admin page with `toString()`. Keep them self-contained: no module helpers, no named inner functions (the bundler wraps those in `__name()`, which does not exist in the page). `test.mjs` runs the injected copies.
 - Every SQL statement binds its values with `?`. Everything printed into HTML goes through `esc()`. No inline event handlers: pages run under a nonce-based CSP, confirm prompts use `data-confirm`.
