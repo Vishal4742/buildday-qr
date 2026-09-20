@@ -320,7 +320,10 @@ export class Gate extends DurableObject {
   }
 
   current(url) {
-    if (!this.open) return Response.json({ open: false, ...this.stats() }, { headers: NO_STORE }); // no codes are made while closed
+    // v is the deployed version. A display tab that was opened before a deploy keeps running the old page code and
+    // never refreshes by itself, so the page compares v on every poll and reloads when it changes.
+    const v = this.env.VERSION?.id ?? '';
+    if (!this.open) return Response.json({ v, open: false, ...this.stats() }, { headers: NO_STORE }); // no codes are made while closed
     const now = Date.now();
     const t = this.tokens.get(this.cur);
     // New code when the last one was claimed, opened by someone, or on screen long enough for a photo of it to travel.
@@ -337,7 +340,7 @@ export class Gate extends DurableObject {
       this.img = qr.createDataURL(8, 32);
     }
     const img = url.searchParams.get('have') === this.cur ? undefined : this.img;
-    return Response.json({ open: true, token: this.cur, img, ...this.stats() }, { headers: NO_STORE });
+    return Response.json({ v, open: true, token: this.cur, img, ...this.stats() }, { headers: NO_STORE });
   }
 
   stats() {
@@ -640,7 +643,15 @@ document.getElementById('file').addEventListener('change', async (e) => {
 
 const displayPage = (nonce, base) => `
 <style nonce="${nonce}">
-  #qr { width: min(72vmin, 600px); aspect-ratio: 1; margin: 0 auto; padding: 8px; border-radius: 16px; background: #fff; color: #111; display: grid; place-items: center; font-size: 1.3rem; transition: opacity .2s }
+  /* The whole code has to fit in the window with no scrolling: a QR with its bottom corner below the fold cannot be
+     scanned, which is exactly what happened on a 1536x864 laptop. So the box is sized from the window's HEIGHT, minus
+     what the text around it needs, and everything else on this page is kept tight. dvh where there is a phone toolbar. */
+  body { padding: 12px }
+  h1 { margin: 0 0 6px }
+  h2 { font-size: clamp(1.1rem, 3.4vh, 1.7rem); margin: 0 0 10px }
+  #stat { margin: 10px 0 4px }
+  .dim { margin: 0; font-size: .85rem }
+  #qr { width: min(calc(100vh - 215px), 94vw, 720px); width: min(calc(100dvh - 215px), 94vw, 720px); min-width: 180px; aspect-ratio: 1; margin: 0 auto; padding: 8px; border-radius: 16px; background: #fff; color: #111; display: grid; place-items: center; font-size: 1.3rem; transition: opacity .2s }
   #qr img { width: 100%; height: 100%; image-rendering: pixelated; display: block }
 </style>
 <h2>Scan to claim your credits</h2>
@@ -652,6 +663,7 @@ const displayPage = (nonce, base) => `
   const qr = document.getElementById('qr'), stat = document.getElementById('stat');
   const picture = Object.assign(new Image(), { alt: 'QR code to claim credits' });
   let have = '';
+  let version = '';
   const stayAwake = () => navigator.wakeLock?.request('screen').catch(() => {});
   document.addEventListener('visibilitychange', stayAwake);
   stayAwake();
@@ -665,6 +677,9 @@ const displayPage = (nonce, base) => `
       if (res.status === 404) { qr.textContent = 'This screen is signed out. Open your display link again.'; have = ''; stat.textContent = ''; setTimeout(tick, 3000); return; }
       if (!res.ok) throw new Error('the server answered ' + res.status);
       const d = await res.json();
+      // A new version was deployed while this tab was open: load the new page, or it would keep running old code.
+      if (version && d.v && d.v !== version) { location.reload(); return; }
+      version = d.v || version;
       const blocked = d.open === false ? 'Claiming has not started yet. It opens from the admin panel.'
         : !d.approved ? 'No approved emails loaded yet. Add them in the admin panel.'
         : !d.remaining ? (d.claimed ? 'All credits claimed' : 'No links loaded yet. Add them in the admin panel.') : '';

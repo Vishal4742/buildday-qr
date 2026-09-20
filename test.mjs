@@ -62,7 +62,7 @@ assert.equal((await post(DISPLAY_LINK, null)).status, 404, 'the sign-in link is 
 // The desk laptop reaches the QR and nothing else.
 assert.equal(await status('/screen/export.csv', screen), 404);
 assert.equal((await post('/screen/reset', null, { ...screen, Origin: BASE })).status, 404);
-assert.deepEqual(Object.keys(await current()).sort(), ['approved', 'claimed', 'img', 'open', 'remaining', 'token'], 'the display feed carries no emails or links');
+assert.deepEqual(Object.keys(await current()).sort(), ['approved', 'claimed', 'img', 'open', 'remaining', 'token', 'v'], 'the display feed carries no emails or links');
 
 // A cross-site POST is refused even with the right key, with or without a body.
 assert.equal((await post(ADMIN + '/reset', null, { ...admin, Origin: 'https://evil.example' })).status, 403);
