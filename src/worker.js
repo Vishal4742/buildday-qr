@@ -23,7 +23,9 @@ export default {
     }
     if (req.method !== 'GET' && req.method !== 'POST') return plain('Method not allowed', 405, { Allow: 'GET, POST' });
     const post = req.method === 'POST';
-    if (url.pathname === '/' && !post) return page('Welcome', '<p>Scan the QR code at the check-in desk to claim your credits.</p>');
+    // The home page. For a screen that has signed in through the display link it IS the QR display, because an
+    // organizer opens their own site and expects to see the code there. For everybody else it is a line of text.
+    const home = url.pathname === '/' && !post;
 
     // The admin panel and the display link live under unguessable paths derived from their keys. Every other path,
     // /admin and /login included, gets the same 404, so there is no login page to find, let alone attack.
@@ -37,7 +39,7 @@ export default {
     const custom = /^[\w-]{4,64}$/.test(env.ADMIN_PATH ?? '') && env.ADMIN_PATH !== 'screen' ? env.ADMIN_PATH : '';
     if (custom && env.ADMIN_KEY && seg.length === custom.length && (await same(seg, custom))) role = 'admin';
     else if (/^[a-z2-7]{8}$/.test(seg) && !sub) role = 'public';
-    else if (seg === 'screen') {
+    else if (seg === 'screen' || home) {
       // The QR display has no password. The desk laptop proves itself with a cookie it got from the private display
       // link, so a volunteer types nothing and the address bar, which attendees will photograph along with the QR,
       // only ever says /screen. Without the cookie this is one more 404.
@@ -55,7 +57,7 @@ export default {
         token = sub.slice(1);
       }
     }
-    if (!role) return notFound();
+    if (!role) return home ? welcome() : notFound();
 
     // Reaching the admin area is not being logged in. The object checks the ID and password on every admin request,
     // because the organizer's own login is stored there. What the gate still owns is the cross-site check: the browser
@@ -75,7 +77,8 @@ export default {
       redirect: 'manual', // hand the object's 303s back to the browser instead of chasing them in here
       headers: {
         'X-Role': role,
-        'X-Base': `/${seg}`,
+        'X-Base': role === 'display' ? '/screen' : `/${seg}`, // the display always polls /screen/current, also when shown at /
+        'X-Home': home ? '1' : '',
         'X-Ip': req.headers.get('CF-Connecting-IP') ?? '',
         'X-Token': token,
         Cookie: req.headers.get('Cookie') ?? '',
@@ -209,7 +212,8 @@ export class Gate extends DurableObject {
       // organizer can replace from the panel: a new one kills the old link and signs every screen out at once.
       // Until they first do that there is no token, and the plain link and plain cookie are what match.
       const want = this.kv('display_token');
-      if (!(await same(req.headers.get('X-Token') ?? '', want))) return notFound();
+      // A screen whose link was replaced is a stranger again: a 404 at /screen, and the plain home page at /.
+      if (!(await same(req.headers.get('X-Token') ?? '', want))) return req.headers.get('X-Home') ? welcome() : notFound();
       if (role === 'signin') {
         // Signs this browser in and moves on, so the secret never sits in the address bar of a screen facing the room.
         // Lax, not Strict, or a link tapped from chat or mail would arrive at /screen without its new cookie.
@@ -739,6 +743,7 @@ const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).jo
 
 const NO_STORE = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex, nofollow' };
 const plain = (text, status, headers = {}) => new Response(text, { status, headers: { ...NO_STORE, ...headers } });
+const welcome = () => page('Welcome', '<p>Scan the QR code at the check-in desk to claim your credits.</p><p class="dim">Organizers: this page shows the QR code on any screen that has opened your display link once.</p>');
 const notFound = () => page('Not found', '<p>Nothing here. Scan the QR code at the check-in desk.</p>', { status: 404 });
 
 // `body` is a string, or a function of the nonce for pages that carry a script or an extra style block.

@@ -59,6 +59,14 @@ assert.equal(await status('/screen', screen), 200);
 assert.equal(await status('/screen', { Cookie: `__Host-screen=${'0'.repeat(64)}` }), 404);
 assert.equal(await status('/screen/current', { Cookie: `__Host-screen=${'0'.repeat(64)}` }), 404);
 assert.equal((await post(DISPLAY_LINK, null)).status, 404, 'the sign-in link is GET only');
+// The home page IS the QR display for a signed-in screen, because an organizer opens their own site and expects the
+// code there. For a stranger, and for a forged cookie, it stays a line of text.
+const homeFor = async (headers) => (await fetch(BASE + '/', { headers })).text();
+assert.match(await homeFor(screen), /id="qr"/);
+assert.match(await homeFor(screen), /\/screen\/current/, 'shown at /, it still polls /screen/current');
+assert.ok(!(await homeFor({})).includes('id="qr"'), 'a stranger gets no QR at the home page');
+assert.ok(!(await homeFor({ Cookie: `__Host-screen=${'0'.repeat(64)}` })).includes('id="qr"'), 'nor does a forged cookie');
+assert.equal(await status('/', { Cookie: `__Host-screen=${'0'.repeat(64)}` }), 200, 'and it is the plain home page, not an error');
 // The desk laptop reaches the QR and nothing else.
 assert.equal(await status('/screen/export.csv', screen), 404);
 assert.equal((await post('/screen/reset', null, { ...screen, Origin: BASE })).status, 404);
@@ -288,6 +296,7 @@ assert.match(newLink, new RegExp(`^${KEY_PATH}/[a-z2-7]{16}$`));
 assert.equal(await status(DISPLAY_LINK), 404, 'the old link is dead');
 assert.equal(await status('/screen', oldScreen), 404, 'every signed-in screen is signed out');
 assert.equal(await status('/screen/current', oldScreen), 404);
+assert.ok(!(await homeFor(oldScreen)).includes('id="qr"'), 'a signed-out screen sees the plain home page again');
 assert.equal(await status(newLink.slice(0, -1) + (newLink.endsWith('a') ? 'b' : 'a')), 404, 'a near miss on the token is a 404');
 const resigned = await fetch(BASE + newLink, { redirect: 'manual' });
 assert.equal(resigned.status, 303);
