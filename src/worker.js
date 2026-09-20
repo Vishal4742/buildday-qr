@@ -326,8 +326,10 @@ export class Gate extends DurableObject {
   // Pulls addresses out of whatever gets pasted: one per line, a CSV export, "Name <email>", anything.
   addEmails(form) {
     const found = findEmails(String(form.get('emails') || ''));
+    const count = () => this.sql.exec('SELECT COUNT(*) AS n FROM emails').one().n;
+    const before = count();
     for (const email of found) this.sql.exec('INSERT OR IGNORE INTO emails (email) VALUES (?)', email);
-    return `?emails=${found.length}#people`;
+    return `?emails=${found.length}&fresh=${count() - before}#people`;
   }
 
   people() {
@@ -362,7 +364,8 @@ export class Gate extends DurableObject {
       duplicate: 'Not saved: another line already has that exact link or code.' };
     const key = url.searchParams.get('note');
     const note = n('added') >= 0 ? `Saved ${n('added')} line(s)${n('skipped') > 0 ? `, skipped ${n('skipped')} that were too long or not valid URLs` : ''}.`
-      : n('emails') >= 0 ? `Saved. ${n('emails')} address(es) were in what you sent.`
+      : n('emails') === 0 ? 'Nothing added: no email address was found in what you sent.'
+      : n('emails') > 0 ? `Added ${n('fresh') || 0} new attendee(s). ${n('emails') - (n('fresh') || 0)} were already on the list.`
       : Object.hasOwn(notes, key) ? notes[key] : '';
     const ist = (ms) => new Date(ms).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
     const linkRow = (r) => r.id !== n('edit')
@@ -395,15 +398,25 @@ export class Gate extends DurableObject {
       <p class="dim">Editing a link also moves everyone who already got it: their short link sends them to the new value.</p>
 
       <h2 id="people">Approved attendees</h2>
-      <label for="file">Load the list from a file (.xlsx or .csv)</label>
-      <input type="file" id="file" accept=".xlsx,.csv,.txt">
-      <p id="filenote" class="dim" role="status">The file is read here in your browser and never uploaded. The addresses found in it land in the box below, and nothing is saved until you press the button.</p>
+      <p>Three ways to add people. Anyone you add can claim straight away.</p>
+
+      <h3>1. Add one attendee</h3>
+      <form method="post" action="${base}/emails" class="rowform">
+        <input id="one" name="emails" type="email" required maxlength="254" placeholder="name@example.com" aria-label="One attendee's email" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <button>Add attendee</button>
+      </form>
+
+      <h3>2. Add many: paste a list</h3>
       <form method="post" action="${base}/emails">
-        <label for="emails">Emails to approve</label>
+        <label for="emails">Any shape works: one per line, a CSV export, names mixed in. Only the addresses are kept.</label>
         <textarea id="emails" name="emails" rows="6" required></textarea>
-        <p class="dim">Or paste in any shape: one per line, a CSV export, names mixed in. Only the addresses are kept, and ones already on the list are skipped. For a walk-in, add their email here and they can claim right away.</p>
         <button>Save emails</button>
       </form>
+
+      <h3>3. Add from an Excel or CSV file</h3>
+      <label for="file">Choose a .xlsx or .csv file</label>
+      <input type="file" id="file" accept=".xlsx,.csv,.txt">
+      <p id="filenote" class="dim" role="status">The file is read here in your browser and never uploaded. The addresses found in it land in the box under option 2. Check them, then press "Save emails".</p>
       <p><a href="${base}/export.csv">Download the list with claim status</a> <span class="dim">(CSV, opens in Excel)</span></p>
       <label for="find">Find an attendee</label>
       <input id="find" type="search" placeholder="type any part of an email" autocomplete="off">
@@ -511,8 +524,9 @@ document.getElementById('file').addEventListener('change', async (e) => {
     found = [...new Set(findEmails(text))];
   } catch {}
   document.getElementById('emails').value = found.join('\\n');
-  note.textContent = found.length ? 'Found ' + found.length + ' address(es). Check them below, then press Save emails.'
+  note.textContent = found.length ? 'Found ' + found.length + ' address(es). They are in the box under option 2. Check them, then press Save emails.'
     : 'No email addresses found in that file. Save it as .xlsx or .csv and try again.';
+  if (found.length) document.getElementById('emails').scrollIntoView({ block: 'center' });
 });
 </script>`;
 
@@ -569,8 +583,10 @@ const CSS = `
   .admin { text-align: left }
   .admin form { margin-bottom: 8px }
   .admin h2 { font-size: 1.25rem; margin: 48px 0 4px; padding-top: 16px; border-top: 1px solid #2a2a33 }
+  .admin h3 { font-size: 1rem; margin: 28px 0 8px }
   .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
   .rowform input[name=val] { flex: 1 1 320px }
+  .rowform input[type=email] { flex: 1 1 240px; margin: 0; padding: 10px; text-align: left }
   .rowform button { padding: 8px 16px; margin: 0 }
   button.link { background: none; color: #8fb4ff; padding: 0; font-weight: 400; font-size: inherit; text-decoration: underline }
   input[type=file] { font: inherit; border-style: dashed }
