@@ -23,6 +23,23 @@ There is no `/admin`. The panel and the display link are private addresses worke
 
 The display has no password. Opening the display link signs that browser in for two weeks and moves it to `/screen`. So the link is the secret: send it to the check-in desk and nobody else. If it ever leaks, set a new `DISPLAY_KEY`. The old link dies and every signed-in screen is signed out.
 
+## Getting in, and changing a key
+
+Open your admin address, the one `urls.mjs` printed. The browser shows a login box. Type anything as the username and your `ADMIN_KEY` as the password. There is no login page to find anywhere else, and that is on purpose.
+
+To change a key, run one command from the repo folder, in your own terminal:
+
+```
+node rotate.mjs admin https://claim.yourdomain.com       # new admin password
+node rotate.mjs display https://claim.yourdomain.com     # new display link
+```
+
+It makes a strong random key, or takes your own as a third argument if it is at least 16 characters. Add `--dry-run` to see the plan first. The new key is printed once and kept nowhere, so save it.
+
+Two things surprise people. The admin address changes together with the password, because the address is worked out from the key. Your old bookmark will say "Not found", which is expected, and the command prints the new address to bookmark. And nothing else changes: links, emails and claims stay exactly as they were.
+
+Don't change a key with `wrangler secret put` by hand once the Pages front door exists. Pages keeps its own copy, only picks a new value up on its next deploy, and every older Pages deployment stays reachable at its own address with the old key still working. `rotate.mjs` sets both copies, redeploys, and deletes the older deployments.
+
 ## Your own domain
 
 Worth doing for two reasons. Attendees see your name instead of `workers.dev` when their camera reads the code, and developers notice that. And some Indian mobile networks have blocked `workers.dev` addresses in the past.
@@ -42,7 +59,7 @@ Cloudflare Workers only accept domains that Cloudflare manages. Cloudflare Pages
 5. At your DNS provider add a CNAME record. Host: `claim`. Value: `buildday-qr.pages.dev`. If you added this record before step 4, nothing is lost. It just won't resolve until step 4 is done.
 6. Wait for the dashboard to show the domain as active, usually a few minutes. Then run `node urls.mjs https://claim.yourdomain.com <ADMIN_KEY> <DISPLAY_KEY>` for your new admin address and display link. Only the front part changes.
 
-Three things to know. Every key now lives in two places, so change it in both or the two entrances disagree: `npx wrangler secret put DISPLAY_KEY` and `npx wrangler pages secret put DISPLAY_KEY --project-name buildday-qr`. Pages keeps every old deployment reachable at its own `<hash>.buildday-qr.pages.dev` address. After a deploy that fixes something in the gate, delete the older ones with `npx wrangler pages deployment list --project-name buildday-qr` and `npx wrangler pages deployment delete <id> --project-name buildday-qr`, or stale gate code stays reachable. And this route gives you no Cloudflare firewall rule, because that needs the whole domain on Cloudflare. Classic Pages is also the older of Cloudflare's two platforms, so treat this as the route for the event and look at the next one afterwards.
+Three things to know. Every key now lives in two places, so change keys with `node rotate.mjs` and not by hand (see "Getting in, and changing a key"). Pages keeps every old deployment reachable at its own `<hash>.buildday-qr.pages.dev` address. After a deploy that fixes something in the gate, delete the older ones with `npx wrangler pages deployment list --project-name buildday-qr` and `npx wrangler pages deployment delete <id> --project-name buildday-qr`, or stale gate code stays reachable. And this route gives you no Cloudflare firewall rule, because that needs the whole domain on Cloudflare. Classic Pages is also the older of Cloudflare's two platforms, so treat this as the route for the event and look at the next one afterwards.
 
 ### The thorough way: move the domain's nameservers to Cloudflare
 

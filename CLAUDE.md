@@ -12,6 +12,7 @@ A check-in gate that hands out sponsor credits at a developer event (Fable 5.1 B
 - Tests: `npm test` in a second terminal while the dev server runs, about 10 seconds · lint/format: none configured · types: none, plain JavaScript
 - Deploy: `npm run deploy`, only after `npm test` exits 0. It updates both entrances: the Worker (owns the Durable Object) and the classic Pages project in `pages/` (the front door for a custom domain by CNAME). A change to the gate that reaches only one of them leaves stale gate code live on the other. After a security fix, also delete the older Pages deployments, which stay reachable at their hash URLs.
 - Private URLs: `node urls.mjs <site> <ADMIN_KEY> <DISPLAY_KEY>`
+- Change a key: `node rotate.mjs <admin|display> <site> [own-key] [--dry-run]`. Never by hand: Pages binds secrets at deploy time and old Pages deployments keep answering to the old key.
 - Smoke: `/smoke`
 
 ## Conventions
@@ -43,4 +44,5 @@ Append one line after every correction ("Update your CLAUDE.md so you don't make
 - A strict CSP breaks pages silently. After touching headers or scripts, load every page in a real browser and look for `securitypolicyviolation` events.
 - Apply the three-techniques harness at the start of a project, not right before the first commit.
 - `wrangler pages project create` no longer makes a classic Pages project. In wrangler 4.13x it deployed this directory as a brand-new public Worker under the given name, with its own empty Durable Object. Before running any create or deploy command that has not been run in this repo before, read its `--help` and use `--dry-run` where there is one. Classic Pages needs wrangler's `--force` opt-out, and that is the organizer's call.
+- The organizer's mental model is "same address, new password", but here the admin address is derived from the key and moves with it. Any command with a side effect like that has to say so in its own output, at the moment it happens.
 - When the organizer gets a behaviour wrong in a calm quiz (Edit versus Delete on a claimed link), a volunteer will get it wrong at a busy desk. Put the consequence in the confirm dialog at the moment of the click, not only in the README.
