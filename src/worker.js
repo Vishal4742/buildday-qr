@@ -90,7 +90,7 @@ export class Gate extends DurableObject {
   recent = []; // when the last minute's successful claims happened
   okLogin = ''; // the last Authorization header that checked out, so the slow password hash runs once and not per click
   cur = '';
-  svg = '';
+  img = '';
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -331,10 +331,13 @@ export class Gate extends DurableObject {
       const qr = qrcode(0, 'M');
       qr.addData(`${url.origin}/${this.cur}`);
       qr.make();
-      this.svg = qr.createSvgTag({ cellSize: 1, margin: 4, scalable: true, title: 'QR code to claim credits' });
+      // A real image, not an SVG. An SVG's black and white are only colours, and dark-mode extensions, forced dark
+      // themes and Windows high contrast repaint colours: the code was there and nobody could see it. They leave
+      // images alone. 8 px per module with a 4-module white border of its own, so it scans on any background.
+      this.img = qr.createDataURL(8, 32);
     }
-    const svg = url.searchParams.get('have') === this.cur ? undefined : this.svg;
-    return Response.json({ open: true, token: this.cur, svg, ...this.stats() }, { headers: NO_STORE });
+    const img = url.searchParams.get('have') === this.cur ? undefined : this.img;
+    return Response.json({ open: true, token: this.cur, img, ...this.stats() }, { headers: NO_STORE });
   }
 
   stats() {
@@ -638,7 +641,7 @@ document.getElementById('file').addEventListener('change', async (e) => {
 const displayPage = (nonce, base) => `
 <style nonce="${nonce}">
   #qr { width: min(72vmin, 600px); aspect-ratio: 1; margin: 0 auto; padding: 8px; border-radius: 16px; background: #fff; color: #111; display: grid; place-items: center; font-size: 1.3rem; transition: opacity .2s }
-  #qr svg { width: 100%; height: 100%; shape-rendering: crispEdges }
+  #qr img { width: 100%; height: 100%; image-rendering: pixelated; display: block }
 </style>
 <h2>Scan to claim your credits</h2>
 <div id="qr">Loading…</div>
@@ -647,6 +650,7 @@ const displayPage = (nonce, base) => `
 <p class="dim">One claim per registered email. The code changes every time someone scans it, so photos and screenshots of it are no use to anyone.</p>
 <script nonce="${nonce}">
   const qr = document.getElementById('qr'), stat = document.getElementById('stat');
+  const picture = Object.assign(new Image(), { alt: 'QR code to claim credits' });
   let have = '';
   const stayAwake = () => navigator.wakeLock?.request('screen').catch(() => {});
   document.addEventListener('visibilitychange', stayAwake);
@@ -665,7 +669,7 @@ const displayPage = (nonce, base) => `
         : !d.approved ? 'No approved emails loaded yet. Add them in the admin panel.'
         : !d.remaining ? (d.claimed ? 'All credits claimed' : 'No links loaded yet. Add them in the admin panel.') : '';
       if (blocked) { qr.textContent = blocked; have = ''; }
-      else if (d.svg) { qr.innerHTML = d.svg; have = d.token; }
+      else if (d.img) { picture.src = d.img; if (!picture.isConnected) { qr.textContent = ''; qr.append(picture); } have = d.token; }
       qr.style.opacity = 1;
       stat.textContent = d.claimed + ' of ' + d.approved + ' attendees claimed · ' + d.remaining + ' credits left';
     } catch (e) {
@@ -728,7 +732,8 @@ const notFound = () => page('Not found', '<p>Nothing here. Scan the QR code at t
 // no framing. form-action is left off the public pages because a claim ends in a redirect to the credit's own site.
 function page(title, body, { status = 200, headers = {}, admin = false } = {}) {
   const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
-  const csp = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'${admin ? "; form-action 'self'" : ''}`;
+  // img-src data: is for the QR code, which the display gets as an image inside the feed. Nothing is loaded from anywhere.
+  const csp = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'${admin ? "; form-action 'self'" : ''}`;
   return new Response(
     // color-scheme: the pages are dark already. Saying so stops phone browsers (Samsung Internet, Chrome's "dark theme
     // for sites") from repainting them, which turns the white QR box dark and makes a black QR code invisible.

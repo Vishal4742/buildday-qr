@@ -62,7 +62,7 @@ assert.equal((await post(DISPLAY_LINK, null)).status, 404, 'the sign-in link is 
 // The desk laptop reaches the QR and nothing else.
 assert.equal(await status('/screen/export.csv', screen), 404);
 assert.equal((await post('/screen/reset', null, { ...screen, Origin: BASE })).status, 404);
-assert.deepEqual(Object.keys(await current()).sort(), ['approved', 'claimed', 'open', 'remaining', 'svg', 'token'], 'the display feed carries no emails or links');
+assert.deepEqual(Object.keys(await current()).sort(), ['approved', 'claimed', 'img', 'open', 'remaining', 'token'], 'the display feed carries no emails or links');
 
 // A cross-site POST is refused even with the right key, with or without a body.
 assert.equal((await post(ADMIN + '/reset', null, { ...admin, Origin: 'https://evil.example' })).status, 403);
@@ -76,7 +76,7 @@ assert.equal((await post(ADMIN, 'links=' + 'a'.repeat(2_100_000), admin)).status
 // Browser-side backstops on every page: a fresh nonce per response, no framing, no sniffing.
 const home = await fetch(BASE + '/');
 const csp = home.headers.get('Content-Security-Policy');
-assert.match(csp, /default-src 'none'; script-src 'nonce-[0-9a-f]{32}'; style-src 'nonce-[0-9a-f]{32}'/);
+assert.match(csp, /default-src 'none'; script-src 'nonce-[0-9a-f]{32}'; style-src 'nonce-[0-9a-f]{32}'; img-src data:;/);
 assert.match(csp, /frame-ancestors 'none'/);
 assert.notEqual(csp, (await fetch(BASE + '/')).headers.get('Content-Security-Policy'), 'nonce must change on every response');
 assert.equal(home.headers.get('X-Frame-Options'), 'DENY');
@@ -95,9 +95,9 @@ await setup('', new URLSearchParams({ links: 'https://example.com/credit-1\nCODE
 // A messy paste: display names, CSV quotes, mixed case, junk. Only the three addresses should survive.
 await setup('/emails', new URLSearchParams({ emails: 'Asha <Asha@Example.com>, ravi@example.com;\n"Zoya","zoya@example.com"\nnot-an-email' }));
 
-const { token: t1, svg, remaining, approved } = await current();
+const { token: t1, img, remaining, approved } = await current();
 assert.match(t1, /^[a-z2-7]{8}$/);
-assert.match(svg, /^<svg/);
+assert.match(img, /^data:image\/gif;base64,/, 'the QR travels as an image, which dark-mode tools leave alone');
 assert.equal(remaining, 2, 'the junk "http://" line must be skipped');
 assert.equal(approved, 3);
 
@@ -257,7 +257,7 @@ await setup('/open', new URLSearchParams({ open: '0' }));
 const closed = await current();
 assert.equal(closed.open, false);
 assert.equal(closed.token, undefined, 'no code while closed');
-assert.equal(closed.svg, undefined, 'no QR while closed');
+assert.equal(closed.img, undefined, 'no QR while closed');
 assert.equal((await claim(beforeStop, 'late@example.com')).status, 403, 'a code from before the stop must be dead');
 assert.equal(await status('/' + beforeStop), 403);
 assert.match(await (await claim(beforeStop, '', earlyCookie)).text(), /SWITCH-CODE/, 'an earlier claimant keeps their credit');
