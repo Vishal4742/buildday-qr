@@ -35,7 +35,9 @@ Then scroll to "Admin login" at the bottom of the panel and set your own ID and 
 
 If the long random address is a nuisance, give the panel a second, memorable one: `npx wrangler secret put ADMIN_PATH`, and the same with `npx wrangler pages secret put ADMIN_PATH --project-name buildday-qr`, then `npm run deploy`. It is a secret, not a config value, so it never lands in a public repo. Be honest with yourself about the trade: a word someone can guess is not a secret, and from then on your password and its five-tries lock are what stands between an attendee and the panel. Pick a word that isn't your name, and a password that isn't a number people around you know.
 
-You only need the command line for the keys themselves, for example after a leak. Run one command from the repo folder, in your own terminal:
+Everything you need on event day is in the panel, so you can run it from a phone: the Start / Stop switch for claiming, links and their capacities, attendees, your own login, a "Make a new display link" button that kills the old link and signs every screen out, the three tuning numbers, and a counter of wrong login attempts.
+
+The command line is only for the keys themselves, for example after the `ADMIN_KEY` has leaked. That one stays out of the panel on purpose: it is your way back in when everything stored has gone wrong, so it must not depend on anything stored. Run one command from the repo folder, in your own terminal:
 
 ```
 node rotate.mjs admin https://claim.yourdomain.com       # new admin password

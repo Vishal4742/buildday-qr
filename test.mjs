@@ -9,9 +9,15 @@ const BASE = process.env.BASE || 'http://localhost:8787';
 // Worked out here on its own, the same way urls.mjs documents it, so the test also proves that recipe is right.
 const secretPath = (label, key) => createHash('sha256').update(`${label}-path:${key}`).digest('hex').slice(0, 20);
 const ADMIN = `/${secretPath('admin', 'dev')}`;
-const DISPLAY_LINK = `/${secretPath('display', 'devdisplay')}`;
+const KEY_PATH = `/${secretPath('display', 'devdisplay')}`;
 const basic = (key) => 'Basic ' + btoa('x:' + key);
 const admin = { Authorization: basic('dev'), Origin: BASE };
+
+// The display link has two halves: one derived from DISPLAY_KEY, and a token the organizer can replace from the panel.
+// The panel is where the current link is shown, so that is where the test reads it, whatever an earlier run left behind.
+const panelLink = (html) => new URL(html.match(/id="dlink" readonly value="([^"]+)"/)[1]).pathname;
+const DISPLAY_LINK = panelLink(await (await fetch(BASE + ADMIN, { headers: admin })).text());
+assert.ok(DISPLAY_LINK.startsWith(KEY_PATH), 'the first half of the display link still comes from DISPLAY_KEY');
 
 // The display has no password. Opening the private link signs the browser in with a cookie and moves it to /screen,
 // so the secret never sits in the address bar of a laptop that faces the room.
@@ -19,8 +25,8 @@ const signIn = await fetch(BASE + DISPLAY_LINK, { redirect: 'manual' });
 assert.equal(signIn.status, 303);
 assert.equal(signIn.headers.get('Location'), BASE + '/screen');
 assert.equal(signIn.headers.get('WWW-Authenticate'), null, 'no password prompt on the display');
-assert.match(signIn.headers.getSetCookie()[0], /^__Host-screen=[0-9a-f]{64}; Path=\/; Max-Age=\d+; HttpOnly; Secure; SameSite=Lax$/);
-const screen = { Cookie: signIn.headers.getSetCookie()[0].split(';')[0] };
+assert.match(signIn.headers.getSetCookie()[0], /^__Host-screen=[0-9a-f]{64}(\.[a-z2-7]{16})?; Path=\/; Max-Age=\d+; HttpOnly; Secure; SameSite=Lax$/);
+let screen = { Cookie: signIn.headers.getSetCookie()[0].split(';')[0] };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const current = async () => (await fetch(BASE + '/screen/current', { headers: screen })).json();
@@ -260,6 +266,35 @@ assert.equal((await post(ADMIN + '/open', new URLSearchParams({ open: '1' }), { 
 await setup('/open', new URLSearchParams({ open: '1' }));
 assert.match(await adminHtml(), /Claiming is OPEN/);
 assert.equal((await claim((await current()).token, 'late@example.com')).status, 200, 'and it works again once reopened');
+
+// ===== Nothing needs a laptop: settings and a new display link, both from the panel =====
+await setup('/settings', new URLSearchParams({ rotate_seconds: '30', ttl_seconds: '200', max_claims_per_minute: '50' }));
+assert.match(await adminHtml(), /name="ttl_seconds"[^>]*value="200"/);
+// Refused as a whole: a code that would die before the screen moves on, and a number out of range.
+const settingsNote = async (fields) => (await post(ADMIN + '/settings', new URLSearchParams(fields), admin)).headers.get('Location');
+assert.match(await settingsNote({ rotate_seconds: '100', ttl_seconds: '50', max_claims_per_minute: '50' }), /badsettings/);
+assert.match(await settingsNote({ rotate_seconds: '1', ttl_seconds: '200', max_claims_per_minute: '50' }), /badsettings/);
+assert.match(await adminHtml(), /name="ttl_seconds"[^>]*value="200"/, 'a refused save changes nothing');
+// Empty boxes go back to the starting values, here the ones in .dev.vars, which the rest of this file relies on.
+await setup('/settings', new URLSearchParams({ rotate_seconds: '', ttl_seconds: '', max_claims_per_minute: '' }));
+assert.match(await adminHtml(), /name="ttl_seconds"[^>]*value="6"/);
+
+// A new display link kills the old link and signs every screen out, without touching DISPLAY_KEY.
+const oldScreen = screen;
+await setup('/display-link', null);
+const newLink = panelLink(await adminHtml());
+assert.notEqual(newLink, DISPLAY_LINK);
+assert.match(newLink, new RegExp(`^${KEY_PATH}/[a-z2-7]{16}$`));
+assert.equal(await status(DISPLAY_LINK), 404, 'the old link is dead');
+assert.equal(await status('/screen', oldScreen), 404, 'every signed-in screen is signed out');
+assert.equal(await status('/screen/current', oldScreen), 404);
+assert.equal(await status(newLink.slice(0, -1) + (newLink.endsWith('a') ? 'b' : 'a')), 404, 'a near miss on the token is a 404');
+const resigned = await fetch(BASE + newLink, { redirect: 'manual' });
+assert.equal(resigned.status, 303);
+screen = { Cookie: resigned.headers.getSetCookie()[0].split(';')[0] };
+assert.match(screen.Cookie, /^__Host-screen=[0-9a-f]{64}\.[a-z2-7]{16}$/);
+assert.equal(await status('/screen', screen), 200);
+assert.equal((await post(ADMIN + '/display-link', null, { ...admin, Origin: 'https://evil.example' })).status, 403);
 
 // ===== Bulk-claim brake =====
 // A script with a list of other people's emails and a supply of fresh codes is held to desk speed.

@@ -4,6 +4,8 @@ import qrcode from 'qrcode-generator';
 const EVENT = 'Fable 5.1 Build Day · Bhopal';
 const MAX_TRIES = 5; // wrong emails one scanned code will take before it dies. A brake per code, not a rate limit: scan() has that
 const PATH_LEN = 20; // hex characters in the secret admin and display paths, 80 bits
+// What the panel's settings form will accept. Outside these, a saved value is ignored and the starting value is used.
+const LIMITS = { rotate_seconds: [5, 600], ttl_seconds: [20, 1800], max_claims_per_minute: [1, 10000] };
 // One answer for "not approved" and "already claimed", so a refusal tells a guesser nothing about who is on the list.
 const REFUSED = 'That email can\'t be used to claim. Check the spelling and use the one you registered with, or talk to an organizer.';
 
@@ -28,6 +30,7 @@ export default {
     const [, seg, ...rest] = url.pathname.split('/');
     const sub = rest.length ? `/${rest.join('/')}` : '';
     let role = '';
+    let token = ''; // the panel-managed half of the display credential, when the request carries one
     // ADMIN_PATH is an optional, memorable second address for the admin panel, kept as a secret so it never lands in a
     // public repo. It is checked before the claim-code pattern, because an eight-letter word looks exactly like a code.
     // It is only as private as it is hard to guess, so with one set, the login and its lockout carry the weight.
@@ -38,15 +41,18 @@ export default {
       // The QR display has no password. The desk laptop proves itself with a cookie it got from the private display
       // link, so a volunteer types nothing and the address bar, which attendees will photograph along with the QR,
       // only ever says /screen. Without the cookie this is one more 404.
-      const cookie = req.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-screen=([0-9a-f]{64})(?:;|$)/)?.[1];
-      if (cookie && env.DISPLAY_KEY && (await same(cookie, await screenCookie(env.DISPLAY_KEY)))) role = 'display';
+      // The cookie has two halves. The first is derived from DISPLAY_KEY and is checked right here, so junk still never
+      // reaches the object. The second is a token the object keeps, which the organizer can replace from the panel.
+      const cookie = req.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-screen=([0-9a-f]{64})(?:\.([a-z2-7]{16}))?(?:;|$)/);
+      if (cookie && env.DISPLAY_KEY && (await same(cookie[1], await screenCookie(env.DISPLAY_KEY)))) {
+        role = 'display';
+        token = cookie[2] ?? '';
+      }
     } else if (seg.length === PATH_LEN) {
       if (env.ADMIN_KEY && (await same(seg, await secretPath('admin', env.ADMIN_KEY)))) role = 'admin';
-      else if (!sub && !post && env.DISPLAY_KEY && (await same(seg, await secretPath('display', env.DISPLAY_KEY)))) {
-        // The private display link: signs this browser in and moves on, so the secret never sits on screen.
-        // Lax, not Strict, or a link tapped from chat or mail would arrive at /screen without its new cookie.
-        return new Response(null, { status: 303, headers: { ...NO_STORE, Location: `${url.origin}/screen`,
-          'Set-Cookie': `__Host-screen=${await screenCookie(env.DISPLAY_KEY)}; Path=/; Max-Age=1209600; HttpOnly; Secure; SameSite=Lax` } });
+      else if (!post && env.DISPLAY_KEY && /^(\/[a-z2-7]{16})?$/.test(sub) && (await same(seg, await secretPath('display', env.DISPLAY_KEY)))) {
+        role = 'signin'; // the private display link. The object checks the token half and hands out the cookie.
+        token = sub.slice(1);
       }
     }
     if (!role) return notFound();
@@ -71,6 +77,7 @@ export default {
         'X-Role': role,
         'X-Base': `/${seg}`,
         'X-Ip': req.headers.get('CF-Connecting-IP') ?? '',
+        'X-Token': token,
         Cookie: req.headers.get('Cookie') ?? '',
         Authorization: role === 'admin' ? req.headers.get('Authorization') ?? '' : '', // the login only ever travels to the admin area
       },
@@ -88,9 +95,8 @@ export class Gate extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.rotateMs = (Number(env.ROTATE_SECONDS) || 20) * 1000;
-    this.ttlMs = (Number(env.TTL_SECONDS) || 120) * 1000;
-    this.maxPerMinute = Number(env.MAX_CLAIMS_PER_MINUTE) || 30;
+    // wrangler.toml only gives the starting values. The organizer changes these from the panel, without a laptop.
+    this.defaults = { rotate_seconds: Number(env.ROTATE_SECONDS) || 20, ttl_seconds: Number(env.TTL_SECONDS) || 120, max_claims_per_minute: Number(env.MAX_CLAIMS_PER_MINUTE) || 30 };
     this.sql.exec('CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY, val TEXT UNIQUE NOT NULL, uses INTEGER NOT NULL DEFAULT 1)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS emails (email TEXT PRIMARY KEY)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS claims (cid TEXT PRIMARY KEY, link_id INTEGER NOT NULL, at INTEGER NOT NULL, email TEXT)');
@@ -101,6 +107,17 @@ export class Gate extends DurableObject {
   kv(key) {
     return this.sql.exec('SELECT value FROM kv WHERE key = ?', key).toArray()[0]?.value ?? '';
   }
+
+  // A number the organizer set in the panel, or the starting value when the box was left empty.
+  setting(key) {
+    const [min, max] = LIMITS[key];
+    const saved = Number(this.kv(key));
+    return saved >= min && saved <= max ? saved : this.defaults[key];
+  }
+
+  get rotateMs() { return this.setting('rotate_seconds') * 1000; }
+  get ttlMs() { return this.setting('ttl_seconds') * 1000; }
+  get maxPerMinute() { return this.setting('max_claims_per_minute'); }
 
   kvSet(key, value) {
     this.sql.exec('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
@@ -187,6 +204,21 @@ export class Gate extends DurableObject {
       if (token) return this.scan(req, token, String(form.get('email') ?? '').trim().toLowerCase().slice(0, 254));
     }
 
+    if (role === 'signin' || role === 'display') {
+      // The gate has already checked the half that comes from DISPLAY_KEY. This is the half kept here, which the
+      // organizer can replace from the panel: a new one kills the old link and signs every screen out at once.
+      // Until they first do that there is no token, and the plain link and plain cookie are what match.
+      const want = this.kv('display_token');
+      if (!(await same(req.headers.get('X-Token') ?? '', want))) return notFound();
+      if (role === 'signin') {
+        // Signs this browser in and moves on, so the secret never sits in the address bar of a screen facing the room.
+        // Lax, not Strict, or a link tapped from chat or mail would arrive at /screen without its new cookie.
+        const value = (await screenCookie(this.env.DISPLAY_KEY)) + (want ? `.${want}` : '');
+        return new Response(null, { status: 303, headers: { ...NO_STORE, Location: `${url.origin}/screen`,
+          'Set-Cookie': `__Host-screen=${value}; Path=/; Max-Age=1209600; HttpOnly; Secure; SameSite=Lax` } });
+      }
+    }
+
     if (role === 'display') {
       if (path === '/_display/current') return this.current(url);
       if (path === '/_display') return page('Scan to claim', (nonce) => displayPage(nonce, base), { admin: true });
@@ -199,6 +231,11 @@ export class Gate extends DurableObject {
       const back = (query = '') => Response.redirect(`${url.origin}${base}${query}`, 303);
       if (path === '/_admin/export.csv') return this.exportCsv();
       if (post && path === '/_admin/login') return back(await this.setLogin(form));
+      if (post && path === '/_admin/display-link') {
+        this.kvSet('display_token', randomWord(16));
+        return back('?note=newlink#display');
+      }
+      if (post && path === '/_admin/settings') return back(this.saveSettings(form));
       if (post && path === '/_admin/open') {
         const open = form.get('open') === '1';
         this.kvSet('claims_open', open ? '1' : '');
@@ -338,6 +375,25 @@ export class Gate extends DurableObject {
     return `?note=saved#l${id}`;
   }
 
+  // An empty box means "back to the starting value". Anything out of range, or a code that would die before the
+  // screen has even moved on from it, is refused as a whole so the settings never end up half saved.
+  saveSettings(form) {
+    const next = {};
+    for (const key of Object.keys(LIMITS)) {
+      const text = String(form.get(key) ?? '').trim();
+      const value = Number(text);
+      const [min, max] = LIMITS[key];
+      if (text && !(Number.isInteger(value) && value >= min && value <= max)) return '?note=badsettings#settings';
+      next[key] = text ? value : '';
+    }
+    if ((next.ttl_seconds || this.defaults.ttl_seconds) <= (next.rotate_seconds || this.defaults.rotate_seconds)) return '?note=badsettings#settings';
+    for (const [key, value] of Object.entries(next)) {
+      if (value === '') this.sql.exec('DELETE FROM kv WHERE key = ?', key);
+      else this.kvSet(key, value);
+    }
+    return '?note=settings#settings';
+  }
+
   // Pulls addresses out of whatever gets pasted: one per line, a CSV export, "Name <email>", anything.
   addEmails(form) {
     const found = findEmails(String(form.get('emails') || ''));
@@ -366,12 +422,17 @@ export class Gate extends DurableObject {
   async adminPage(url, base) {
     const { claimed, approved, remaining } = this.stats();
     const links = this.sql.exec('SELECT l.id, l.val, l.uses, (SELECT COUNT(*) FROM claims c WHERE c.link_id = l.id) AS used FROM links l ORDER BY l.id').toArray();
-    const display = this.env.DISPLAY_KEY ? `/${await secretPath('display', this.env.DISPLAY_KEY)}` : '';
+    const displayToken = this.kv('display_token');
+    const display = this.env.DISPLAY_KEY ? `/${await secretPath('display', this.env.DISPLAY_KEY)}${displayToken ? `/${displayToken}` : ''}` : '';
+    const lockedUntil = Number(this.kv('login_locked_until'));
     const n = (k) => parseInt(url.searchParams.get(k));
     // Only fixed strings and parsed numbers reach the page, never text from the query string. hasOwn, because a
     // plain lookup would happily return Object.prototype members for ?note=constructor.
     const notes = { saved: 'Link saved.', deleted: 'Link deleted.', removed: 'Email removed from the approved list.',
       login: 'New login saved. If the browser asks you to log in again, use the new ID and password.',
+      newlink: 'New display link made. The old link is dead and every screen was signed out. Open the new link on the desk device.',
+      settings: 'Settings saved. They apply from the next code on.',
+      badsettings: 'Not saved: a number was out of range, or a code would die before the screen moves on. Keep "stays valid" larger than "changes every".',
       badid: 'Not saved: the ID needs 3 to 40 letters, digits or symbols, with no spaces and no colon.',
       badpw: 'Not saved: the password needs at least 10 characters, plain letters, digits and symbols, and must differ from the ID.',
       mismatch: 'Not saved: the two passwords were not the same.',
@@ -405,7 +466,7 @@ export class Gate extends DurableObject {
         </form>
       </div>
       <p><b>${claimed}</b> of <b>${approved}</b> approved attendees claimed. Credits left: <b>${remaining}</b>.
-      ${display ? `<a href="${display}">Open the QR display</a> <span class="dim">(no password: that private link signs a browser in, so only give it to the desk)</span>` : '<b>Set DISPLAY_KEY to get a QR display.</b>'}</p>
+      ${display ? `<a href="${display}">Open the QR display</a>` : '<b>Set DISPLAY_KEY to get a QR display.</b>'}</p>
       ${note && `<p class="note" role="status">${note}</p>`}
 
       <h2 id="links">Credit links</h2>
@@ -459,7 +520,28 @@ export class Gate extends DurableObject {
         <label for="apw2">The same password again</label>
         <input id="apw2" name="again" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
         <p class="dim">The address of this page stays the same. Forgot the password one day? The long admin key always works as the password, with any ID. Five wrong passwords lock the ID and password for five minutes. The admin key is never locked.</p>
+        <p class="dim">Wrong logins since the last good one: <b>${Number(this.kv('login_failures')) || 0}</b>.${lockedUntil > Date.now() ? ` Your ID and password are locked until ${ist(lockedUntil)}.` : ''} A number that climbs while you are not typing means someone is guessing.</p>
         <button>Save login</button>
+      </form>
+
+      <h2 id="display">QR display</h2>
+      ${display ? `<label for="dlink">Display link. Open it on the desk device. It asks for no password, so give it to the desk and nobody else.</label>
+      <input id="dlink" readonly value="${esc(url.origin + display)}">
+      <form method="post" action="${base}/display-link" data-confirm="Make a new display link? The old link stops working and every screen signed in with it is signed out at once.">
+        <button class="danger">Make a new display link</button>
+      </form>
+      <p class="dim">Press this if the link has reached people who should not have it. Then open the new link on the desk device.</p>` : '<p>Set DISPLAY_KEY to get a QR display.</p>'}
+
+      <h2 id="settings">Settings</h2>
+      <form method="post" action="${base}/settings">
+        <label for="s1">The QR changes by itself every (seconds, ${LIMITS.rotate_seconds.join(' to ')})</label>
+        <input id="s1" name="rotate_seconds" type="number" min="${LIMITS.rotate_seconds[0]}" max="${LIMITS.rotate_seconds[1]}" value="${this.setting('rotate_seconds')}">
+        <label for="s2">A scanned code stays valid for (seconds, ${LIMITS.ttl_seconds.join(' to ')})</label>
+        <input id="s2" name="ttl_seconds" type="number" min="${LIMITS.ttl_seconds[0]}" max="${LIMITS.ttl_seconds[1]}" value="${this.setting('ttl_seconds')}">
+        <label for="s3">Most claims allowed in one minute (${LIMITS.max_claims_per_minute.join(' to ')})</label>
+        <input id="s3" name="max_claims_per_minute" type="number" min="${LIMITS.max_claims_per_minute[0]}" max="${LIMITS.max_claims_per_minute[1]}" value="${this.setting('max_claims_per_minute')}">
+        <p class="dim">If people keep seeing "That code is no longer valid", raise the second number. If honest people see "Too many claims right now", raise the third. Empty a box to go back to its starting value.</p>
+        <button>Save settings</button>
       </form>
 
       <h2>Danger zone</h2>
@@ -709,7 +791,8 @@ function cleanLink(line) {
 }
 
 // 32-letter alphabet so `byte & 31` picks evenly. 32^8 is about 10^12 guesses for a code that lives two minutes.
-const newToken = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
+const randomWord = (length) => [...crypto.getRandomValues(new Uint8Array(length))].map((b) => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
+const newToken = () => randomWord(8);
 
 const sha256 = async (s) => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
 // Hashing first makes both sides 32 bytes, which timingSafeEqual needs, and then the comparison takes the same time
