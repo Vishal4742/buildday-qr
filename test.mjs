@@ -67,6 +67,11 @@ assert.match(await homeFor(screen), /\/screen\/current/, 'shown at /, it still p
 assert.ok(!(await homeFor({})).includes('id="qr"'), 'a stranger gets no QR at the home page');
 assert.ok(!(await homeFor({ Cookie: `__Host-screen=${'0'.repeat(64)}` })).includes('id="qr"'), 'nor does a forged cookie');
 assert.equal(await status('/', { Cookie: `__Host-screen=${'0'.repeat(64)}` }), 200, 'and it is the plain home page, not an error');
+// Logging into the admin panel signs that device in as a display too, so a new phone needs no long link.
+const panelCookie = (await fetch(BASE + ADMIN, { headers: admin })).headers.getSetCookie().find((c) => c.startsWith('__Host-screen='));
+assert.match(panelCookie, /^__Host-screen=[0-9a-f]{64}(\.[a-z2-7]{16})?; Path=\/; Max-Age=\d+; HttpOnly; Secure; SameSite=Lax$/);
+assert.match(await homeFor({ Cookie: panelCookie.split(';')[0] }), /id="qr"/, 'after a panel login the home page shows the QR');
+assert.equal((await fetch(BASE + ADMIN)).headers.getSetCookie().length, 0, 'no login, no cookie');
 // The desk laptop reaches the QR and nothing else.
 assert.equal(await status('/screen/export.csv', screen), 404);
 assert.equal((await post('/screen/reset', null, { ...screen, Origin: BASE })).status, 404);

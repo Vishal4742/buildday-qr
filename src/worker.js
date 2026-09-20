@@ -219,7 +219,7 @@ export class Gate extends DurableObject {
         // Lax, not Strict, or a link tapped from chat or mail would arrive at /screen without its new cookie.
         const value = (await screenCookie(this.env.DISPLAY_KEY)) + (want ? `.${want}` : '');
         return new Response(null, { status: 303, headers: { ...NO_STORE, Location: `${url.origin}/screen`,
-          'Set-Cookie': `__Host-screen=${value}; Path=/; Max-Age=1209600; HttpOnly; Secure; SameSite=Lax` } });
+          'Set-Cookie': setScreenCookie(value) } });
       }
     }
 
@@ -560,7 +560,13 @@ export class Gate extends DurableObject {
       </form>
       <form method="post" action="${base}/reset" data-confirm="Delete ALL links, ALL emails and ALL claim records?">
         <button class="danger">Delete everything</button>
-      </form></div>${adminScript(nonce)}`, { admin: true });
+      </form></div>${adminScript(nonce)}`, {
+      admin: true,
+      // Logging into the panel also signs this device in as a display. The organizer is allowed everything a display
+      // is, and it spares them the long display link on every new phone: log in here, and the home page shows the QR.
+      // It also keeps their own device signed in after they make a new display link.
+      headers: this.env.DISPLAY_KEY ? { 'Set-Cookie': setScreenCookie((await screenCookie(this.env.DISPLAY_KEY)) + (displayToken ? `.${displayToken}` : '')) } : {},
+    });
   }
 }
 
@@ -827,6 +833,7 @@ const same = async (a, b) => crypto.subtle.timingSafeEqual(await sha256(a), awai
 const secretPath = async (label, key) => hex(await sha256(`${label}-path:${key}`)).slice(0, PATH_LEN);
 // What a signed-in display browser holds. Also derived from DISPLAY_KEY, so changing that key signs every screen out.
 const screenCookie = async (key) => hex(await sha256(`display-cookie:${key}`));
+const setScreenCookie = (value) => `__Host-screen=${value}; Path=/; Max-Age=1209600; HttpOnly; Secure; SameSite=Lax`;
 
 // For the organizer's own password. It is a human's password, quite possibly one they use elsewhere, so it is stored
 // as PBKDF2 with 100,000 rounds (the most Workers allow) and a random salt, never as a fast hash.
