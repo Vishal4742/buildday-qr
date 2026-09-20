@@ -28,7 +28,12 @@ export default {
     const [, seg, ...rest] = url.pathname.split('/');
     const sub = rest.length ? `/${rest.join('/')}` : '';
     let role = '';
-    if (/^[a-z2-7]{8}$/.test(seg) && !sub) role = 'public';
+    // ADMIN_PATH is an optional, memorable second address for the admin panel, kept as a secret so it never lands in a
+    // public repo. It is checked before the claim-code pattern, because an eight-letter word looks exactly like a code.
+    // It is only as private as it is hard to guess, so with one set, the login and its lockout carry the weight.
+    const custom = /^[\w-]{4,64}$/.test(env.ADMIN_PATH ?? '') && env.ADMIN_PATH !== 'screen' ? env.ADMIN_PATH : '';
+    if (custom && env.ADMIN_KEY && seg.length === custom.length && (await same(seg, custom))) role = 'admin';
+    else if (/^[a-z2-7]{8}$/.test(seg) && !sub) role = 'public';
     else if (seg === 'screen') {
       // The QR display has no password. The desk laptop proves itself with a cookie it got from the private display
       // link, so a volunteer types nothing and the address bar, which attendees will photograph along with the QR,

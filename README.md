@@ -33,6 +33,8 @@ Then scroll to "Admin login" at the bottom of the panel and set your own ID and 
 - The `ADMIN_KEY` keeps working as the password, with any ID. That is how you get back in if you forget yours, so nobody can lock you out.
 - Five wrong passwords lock the ID and password for five minutes. The `ADMIN_KEY` is never locked. Your password is stored as a salted PBKDF2 hash, never as text.
 
+If the long random address is a nuisance, give the panel a second, memorable one: `npx wrangler secret put ADMIN_PATH`, and the same with `npx wrangler pages secret put ADMIN_PATH --project-name buildday-qr`, then `npm run deploy`. It is a secret, not a config value, so it never lands in a public repo. Be honest with yourself about the trade: a word someone can guess is not a secret, and from then on your password and its five-tries lock are what stands between an attendee and the panel. Pick a word that isn't your name, and a password that isn't a number people around you know.
+
 You only need the command line for the keys themselves, for example after a leak. Run one command from the repo folder, in your own terminal:
 
 ```
