@@ -21,3 +21,10 @@ A session-and-login-page redesign was planned and sent to the plan reviewer. The
 
 ## What the next phase needs
 - Those tests, run, before any further change to `login()`.
+
+## Added later in the same phase
+- `ADMIN_PATH`, an optional secret that gives the panel a memorable second address. Matched before the claim-code pattern, because an eight-letter lowercase word has the shape of a code.
+- Three labelled ways to add attendees (one address, a pasted list, an Excel or CSV file), all posting to the same route, with a count of new against already listed.
+- A Start / Stop switch for claiming, stored in `kv` and closed by default. While closed, `current()` makes no codes, `scan()` refuses with 403, and stopping clears the codes already handed out. Someone who already claimed still gets their credit back.
+- Display page: says in words why there is no QR (closed, signed out, no links, no connection), has a `<noscript>` line, and declares `color-scheme: dark` so phone browsers do not repaint the white QR box dark.
+- `npm test` was run once for the switch, because it changes `scan()` and `current()`: exit 0, including the new switch checks. That run also showed the login move had not broken the existing suite.

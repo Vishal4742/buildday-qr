@@ -199,6 +199,12 @@ export class Gate extends DurableObject {
       const back = (query = '') => Response.redirect(`${url.origin}${base}${query}`, 303);
       if (path === '/_admin/export.csv') return this.exportCsv();
       if (post && path === '/_admin/login') return back(await this.setLogin(form));
+      if (post && path === '/_admin/open') {
+        const open = form.get('open') === '1';
+        this.kvSet('claims_open', open ? '1' : '');
+        if (!open) this.tokens.clear(); // codes already sitting on phones die with the switch
+        return back();
+      }
       if (post && path === '/_admin') return back(this.addLinks(form));
       if (post && path === '/_admin/link') return back(this.editLink(form));
       if (post && path === '/_admin/emails') return back(this.addEmails(form));
@@ -229,6 +235,9 @@ export class Gate extends DurableObject {
     const cid = req.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-cid=([0-9a-f-]{36})(?:;|$)/)?.[1] || crypto.randomUUID();
     const mine = this.sql.exec('SELECT l.val FROM claims c JOIN links l ON l.id = c.link_id WHERE c.cid = ?', cid).toArray()[0];
     if (mine) return deliver(mine.val, cid); // this phone already claimed: same link again, never a second one
+    // The organizer's master switch. Links and even the display link get passed around before an event, so nothing
+    // can be claimed until they press Start in the panel. People who already claimed still get their credit back above.
+    if (!this.open) return page('Not open yet', '<h2>Claiming has not started yet</h2><p>The organizers will open it soon. Scan the code on the screen once it appears.</p>', { status: 403 });
 
     const t = this.tokens.get(token);
     const dead = () => page('Code expired', '<h2>That code is no longer valid</h2><p>It was already used or it timed out. Scan the new one on the screen.</p>', { status: 410 });
@@ -268,7 +277,13 @@ export class Gate extends DurableObject {
     return deliver(link.val, cid);
   }
 
+  // Closed until the organizer presses Start. Stored, not in memory, so a restart can never reopen or close it.
+  get open() {
+    return this.kv('claims_open') === '1';
+  }
+
   current(url) {
+    if (!this.open) return Response.json({ open: false, ...this.stats() }, { headers: NO_STORE }); // no codes are made while closed
     const now = Date.now();
     const t = this.tokens.get(this.cur);
     // New code when the last one was claimed, opened by someone, or on screen long enough for a photo of it to travel.
@@ -282,7 +297,7 @@ export class Gate extends DurableObject {
       this.svg = qr.createSvgTag({ cellSize: 1, margin: 4, scalable: true, title: 'QR code to claim credits' });
     }
     const svg = url.searchParams.get('have') === this.cur ? undefined : this.svg;
-    return Response.json({ token: this.cur, svg, ...this.stats() }, { headers: NO_STORE });
+    return Response.json({ open: true, token: this.cur, svg, ...this.stats() }, { headers: NO_STORE });
   }
 
   stats() {
@@ -380,7 +395,15 @@ export class Gate extends DurableObject {
     : 'Delete this link? Nobody has claimed it yet.'}">Delete</button>
           <a href="${base}#links">cancel</a>
         </form></td></tr>`;
+    const open = this.open;
     return page('Admin', (nonce) => `<div class="admin">
+      <div class="switch ${open ? 'on' : 'off'}" role="status">
+        <p><b>Claiming is ${open ? 'OPEN' : 'CLOSED'}.</b> ${open ? 'The screen shows the QR code and approved people can claim.' : 'The screen shows no QR code and nobody can claim, whoever has the links. Press Start when the desk is ready.'}</p>
+        <form method="post" action="${base}/open">
+          <input type="hidden" name="open" value="${open ? '0' : '1'}">
+          <button class="${open ? 'danger' : 'go'}">${open ? 'Stop claiming' : 'Start claiming'}</button>
+        </form>
+      </div>
       <p><b>${claimed}</b> of <b>${approved}</b> approved attendees claimed. Credits left: <b>${remaining}</b>.
       ${display ? `<a href="${display}">Open the QR display</a> <span class="dim">(no password: that private link signs a browser in, so only give it to the desk)</span>` : '<b>Set DISPLAY_KEY to get a QR display.</b>'}</p>
       ${note && `<p class="note" role="status">${note}</p>`}
@@ -537,6 +560,7 @@ const displayPage = (nonce, base) => `
 </style>
 <h2>Scan to claim your credits</h2>
 <div id="qr">Loading…</div>
+<noscript><p class="err">This page needs JavaScript to show the QR code. Turn it on for this site, or use another browser.</p></noscript>
 <p id="stat" aria-live="polite"></p>
 <p class="dim">One claim per registered email. The code changes every time someone scans it, so photos and screenshots of it are no use to anyone.</p>
 <script nonce="${nonce}">
@@ -550,14 +574,23 @@ const displayPage = (nonce, base) => `
   async function tick() {
     if (!document.hidden) try {
       // location.origin, not a relative URL: fetch() refuses relative URLs on a page opened as https://user:key@host/
-      const d = await (await fetch(location.origin + '${base}/current?have=' + have, { cache: 'no-store' })).json();
-      const blocked = !d.approved ? 'No approved emails loaded yet. Add them in the admin panel.'
+      const res = await fetch(location.origin + '${base}/current?have=' + have, { cache: 'no-store' });
+      // Say what is wrong in words. A blank box tells a volunteer nothing.
+      if (res.status === 404) { qr.textContent = 'This screen is signed out. Open your display link again.'; have = ''; stat.textContent = ''; setTimeout(tick, 3000); return; }
+      if (!res.ok) throw new Error('the server answered ' + res.status);
+      const d = await res.json();
+      const blocked = d.open === false ? 'Claiming has not started yet. It opens from the admin panel.'
+        : !d.approved ? 'No approved emails loaded yet. Add them in the admin panel.'
         : !d.remaining ? (d.claimed ? 'All credits claimed' : 'No links loaded yet. Add them in the admin panel.') : '';
       if (blocked) { qr.textContent = blocked; have = ''; }
       else if (d.svg) { qr.innerHTML = d.svg; have = d.token; }
       qr.style.opacity = 1;
       stat.textContent = d.claimed + ' of ' + d.approved + ' attendees claimed · ' + d.remaining + ' credits left';
-    } catch { qr.style.opacity = .15; stat.textContent = 'Connection lost, retrying…'; }
+    } catch (e) {
+      qr.style.opacity = .15;
+      stat.textContent = (/server answered/.test(String(e && e.message)) ? 'Problem: ' + e.message : 'No internet connection') + ', retrying…';
+      if (!have) qr.textContent = 'Waiting for a connection…';
+    }
     setTimeout(tick, 1000);
   }
   tick();
@@ -576,6 +609,12 @@ const CSS = `
   .code { font: 600 1.6rem ui-monospace, monospace; background: #fff; color: #111; padding: 16px; border-radius: 12px; word-break: break-all; user-select: all }
   button { font: inherit; font-weight: 600; padding: 16px 28px; border: 0; border-radius: 12px; background: #3d6df2; color: #fff; cursor: pointer }
   button.danger { background: #b3261e; margin-top: 32px }
+  button.go { background: #1f8a4c }
+  .switch { padding: 16px 18px; border-radius: 12px; margin-bottom: 20px }
+  .switch.on { background: #16301f }
+  .switch.off { background: #3a2a12 }
+  .switch p { margin: 0 0 12px }
+  .switch button { margin: 0 }
   label { display: block; margin: 16px 0 6px }
   textarea, input { width: 100%; font: 15px ui-monospace, monospace; padding: 10px; border-radius: 8px; border: 1px solid #444; background: #16161c; color: inherit }
   input[type=number] { max-width: 160px }
@@ -609,7 +648,9 @@ function page(title, body, { status = 200, headers = {}, admin = false } = {}) {
   const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
   const csp = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'${admin ? "; form-action 'self'" : ''}`;
   return new Response(
-    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · ${esc(EVENT)}</title><style nonce="${nonce}">${CSS}</style><main><h1>${esc(EVENT)}</h1>${typeof body === 'function' ? body(nonce) : body}</main>`,
+    // color-scheme: the pages are dark already. Saying so stops phone browsers (Samsung Internet, Chrome's "dark theme
+    // for sites") from repainting them, which turns the white QR box dark and makes a black QR code invisible.
+    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>${esc(title)} · ${esc(EVENT)}</title><style nonce="${nonce}">${CSS}</style><main><h1>${esc(EVENT)}</h1>${typeof body === 'function' ? body(nonce) : body}</main>`,
     {
       status,
       headers: {

@@ -29,6 +29,9 @@ const claim = (token, email, cookie) => post('/' + token, new URLSearchParams({ 
 const status = async (path, headers = {}) => (await fetch(BASE + path, { headers, redirect: 'manual' })).status;
 const adminHtml = async (query = '') => (await fetch(BASE + ADMIN + query, { headers: admin })).text();
 
+// Claiming starts closed. Open it for the run; the switch itself is tested further down.
+assert.equal((await post(ADMIN + '/open', new URLSearchParams({ open: '1' }), admin)).status, 303);
+
 // ===== Attack surface =====
 
 // Nothing to find. Every guessable path is the same 404 with no login prompt, even for someone holding the real
@@ -53,7 +56,7 @@ assert.equal((await post(DISPLAY_LINK, null)).status, 404, 'the sign-in link is 
 // The desk laptop reaches the QR and nothing else.
 assert.equal(await status('/screen/export.csv', screen), 404);
 assert.equal((await post('/screen/reset', null, { ...screen, Origin: BASE })).status, 404);
-assert.deepEqual(Object.keys(await current()).sort(), ['approved', 'claimed', 'remaining', 'svg', 'token'], 'the display feed carries no emails or links');
+assert.deepEqual(Object.keys(await current()).sort(), ['approved', 'claimed', 'open', 'remaining', 'svg', 'token'], 'the display feed carries no emails or links');
 
 // A cross-site POST is refused even with the right key, with or without a body.
 assert.equal((await post(ADMIN + '/reset', null, { ...admin, Origin: 'https://evil.example' })).status, 403);
@@ -233,6 +236,30 @@ started = performance.now();
 await setup('/emails', new URLSearchParams({ emails: hostile }));
 assert.ok(performance.now() - started < 2000, `server import took ${Math.round(performance.now() - started)} ms`);
 assert.equal((await current()).approved, 1);
+
+// ===== The Start / Stop switch =====
+// Closed means closed for everyone: no code is made, a code from before dies, and an approved email can't claim.
+// Someone who already claimed still gets their own credit back.
+await setup('/reset', null);
+await setup('', new URLSearchParams({ links: 'SWITCH-CODE', uses: '5' }));
+await setup('/emails', new URLSearchParams({ emails: 'early@example.com\nlate@example.com' }));
+const early = await claim((await current()).token, 'early@example.com');
+assert.equal(early.status, 200);
+const earlyCookie = early.headers.getSetCookie()[0].split(';')[0];
+const beforeStop = (await current()).token;
+await setup('/open', new URLSearchParams({ open: '0' }));
+const closed = await current();
+assert.equal(closed.open, false);
+assert.equal(closed.token, undefined, 'no code while closed');
+assert.equal(closed.svg, undefined, 'no QR while closed');
+assert.equal((await claim(beforeStop, 'late@example.com')).status, 403, 'a code from before the stop must be dead');
+assert.equal(await status('/' + beforeStop), 403);
+assert.match(await (await claim(beforeStop, '', earlyCookie)).text(), /SWITCH-CODE/, 'an earlier claimant keeps their credit');
+assert.match(await adminHtml(), /Claiming is CLOSED/);
+assert.equal((await post(ADMIN + '/open', new URLSearchParams({ open: '1' }), { ...admin, Origin: 'https://evil.example' })).status, 403, 'a hostile site cannot open claiming');
+await setup('/open', new URLSearchParams({ open: '1' }));
+assert.match(await adminHtml(), /Claiming is OPEN/);
+assert.equal((await claim((await current()).token, 'late@example.com')).status, 200, 'and it works again once reopened');
 
 // ===== Bulk-claim brake =====
 // A script with a list of other people's emails and a supply of fresh codes is held to desk speed.
