@@ -33,7 +33,18 @@ if (dry) {
   }
 }
 
-const others = list().filter((d) => dry || !d.Id.startsWith(fresh));
+// The new build has to be in Cloudflare's own list before anything is deleted: judged from a list that is behind, the
+// build still serving the site would look like an old one. The list gets a few seconds to catch up.
+let listed = list();
+for (let tries = 1; !dry && tries < 6 && !listed.some((d) => d.Id.startsWith(fresh)); tries++) {
+  await new Promise((r) => setTimeout(r, 3000));
+  listed = list();
+}
+if (!dry && !listed.some((d) => d.Id.startsWith(fresh))) {
+  console.error(`The new build ${fresh} is not in Cloudflare's list yet, so nothing was deleted. Run \`npm run deploy:pages\` again in a minute.`);
+  process.exit(1);
+}
+const others = listed.filter((d) => dry || !d.Id.startsWith(fresh));
 const old = others.filter((d) => d.Environment === 'Production' && d.Branch === 'main');
 for (const d of others.filter((d) => !old.includes(d))) console.log(`left alone, look at it yourself: ${d.Deployment} (${d.Environment}, branch ${d.Branch})`);
 for (const d of old) {
