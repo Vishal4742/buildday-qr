@@ -5,6 +5,7 @@
 // Prints latency and status counts per kind of request, and fails if any rule broke under load.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { throwawayOnly } from './guard.mjs';
 
 const BASE = process.env.BASE || 'http://localhost:8787';
 const ADMIN_KEY = process.env.ADMIN_KEY || 'dev';
@@ -31,9 +32,7 @@ const setup = async (path, fields = {}) => assert.equal((await call('admin', ADM
 const counts = async () => (await call('admin', ADMIN, { headers: admin })).body
   .match(/<b>(\d+)<\/b> of <b>(\d+)<\/b> approved attendees claimed\. Credits left: <b>(\d+)<\/b>/)?.slice(1).map(Number);
 
-const local = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE);
-// https as well, because every admin request carries the key in its Authorization header.
-assert.ok(local || (new URL(BASE).protocol === 'https:' && new URL(BASE).host === process.env.THROWAWAY), `${BASE} is not this machine. This test only runs on a throwaway copy over https that you name: THROWAWAY=${new URL(BASE).host}`);
+throwawayOnly(BASE); // this machine, or a throwaway copy named over https, and never the live site (guard.mjs)
 assert.deepEqual(await counts(), [0, 0, 0], `${BASE} is not empty (or the login failed). This test fills and empties the target, so it stops here.`);
 const panel = (await call('admin', ADMIN, { headers: admin })).body;
 const wasOpen = /Claiming is OPEN/.test(panel);

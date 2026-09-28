@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { throwawayOnly } from './guard.mjs';
 
 const BASE = process.env.BASE || 'http://localhost:8787';
 const ADMIN_KEY = process.env.ADMIN_KEY || 'dev';
@@ -22,8 +23,7 @@ const admin = { Authorization: basic(ADMIN_KEY), Origin: BASE };
 // copy is empty. Empty alone is not enough: the live site is empty between two events. Both checks come before any
 // request that changes something, and a failed login stops it too.
 const local = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE);
-// https as well, because every admin request carries the key in its Authorization header.
-assert.ok(local || (new URL(BASE).protocol === 'https:' && new URL(BASE).host === process.env.THROWAWAY), `${BASE} is not this machine. This suite only runs on a throwaway copy over https that you name: THROWAWAY=${new URL(BASE).host}`);
+throwawayOnly(BASE); // this machine, or a throwaway copy named over https, and never the live site (guard.mjs)
 const firstFetch = await fetch(BASE + ADMIN, { headers: admin });
 assert.equal(firstFetch.status, 200, 'the admin key always opens the panel');
 const firstPanel = await firstFetch.text();
