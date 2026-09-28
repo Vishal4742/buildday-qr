@@ -40,60 +40,40 @@ function run(label, command, options = {}) {
   return result.stdout;
 }
 
-// The key travels on stdin, never on a command line, so it stays out of the process list.
-run(`1/4  set ${NAME} on the Worker (takes effect at once)`, `npx wrangler secret put ${NAME}`, { input: key });
-run(`2/4  set ${NAME} on the Pages project`, `npx wrangler pages secret put ${NAME} --project-name ${PROJECT}`, { input: key });
-const deployed = run('3/4  redeploy Pages so it picks the new key up', 'npx wrangler pages deploy --branch main --commit-dirty=true', { cwd: 'pages' });
-
-// The new key is live from step 1 on, so it is printed before step 4 can fail. Printed last, a failed delete lost it.
-const path = createHash('sha256').update(`${which}-path:${key}`).digest('hex').slice(0, 20);
-if (which === 'admin' && !dry) {
+// Printed before anything changes: from step 1 on the key is live on the Worker, so no failed step may lose it.
+const address = `${site.replace(/\/$/, '')}/${createHash('sha256').update(`${which}-path:${key}`).digest('hex').slice(0, 20)}`;
+if (!dry) {
   console.log('');
-  console.log(`New admin password (shown once, save it now): ${key}`);
-  console.log(`New admin panel address (BOOKMARK THIS ONE):  ${site.replace(/\/$/, '')}/${path}`);
-  console.log('');
-  console.log('The address moved because it is worked out from the key. Your old bookmark now says "Not found".');
-  console.log('That is expected. Your links, emails and claims are exactly as they were.');
-  console.log('Log in at the new address with any username and the new password.');
-  console.log('');
-} else if (!dry) {
-  console.log('');
-  console.log(`New display link: ${site.replace(/\/$/, '')}/${path}`);
-  console.log('Open it again on the desk laptop. Every screen that was signed in has been signed out.');
+  if (which === 'admin') {
+    console.log(`New admin password (save it now): ${key}`);
+    console.log(`New admin panel address (BOOKMARK THIS ONE): ${address}`);
+  } else {
+    console.log(`New display link: ${address}`);
+  }
+  console.log('It takes effect from step 1 on. If a later step fails, fix the error and run the same command again:');
+  console.log('that makes a fresh key and sets it everywhere.');
   console.log('');
 }
 
-// Only older builds of the production branch are deleted, each named first. The newest build carries the site's
-// addresses and is never touched. A build from any other branch may carry a preview alias, so it is left for a person
-// to look at. --force is needed: without it wrangler asks "Are you sure?", takes "no" when nobody can answer, and
-// still exits 0. That is also why the list is read again afterwards: a delete that did not happen must not pass.
-console.log(`${dry ? '[dry run] ' : ''}4/4  delete older Pages deployments, which still answer to the old key`);
-const fresh = dry ? '' : deployed.match(/https:\/\/([0-9a-f]{8})\./)?.[1];
-if (!dry && !fresh) {
-  console.error('Could not tell which deployment is the new one, so nothing was deleted.');
-  console.error(`Delete the old ones yourself, after looking at them: npx wrangler pages deployment list --project-name ${PROJECT}`);
+// The key travels on stdin, never on a command line, so it stays out of the process list.
+run(`1/3  set ${NAME} on the Worker (takes effect at once)`, `npx wrangler secret put ${NAME}`, { input: key });
+run(`2/3  set ${NAME} on the Pages project`, `npx wrangler pages secret put ${NAME} --project-name ${PROJECT}`, { input: key });
+// A new Pages build picks the key up; the older builds, which still answer to the old key, are deleted and checked.
+console.log(`${dry ? '[dry run] ' : ''}3/3  redeploy Pages so it picks the new key up, and delete its older builds`);
+const pages = spawnSync(`node deploy-pages.mjs${dry ? ' --dry-run' : ''}`, { shell: true, encoding: 'utf8' });
+console.log(pages.stdout.trim().replace(/^/gm, '     '));
+if (pages.status !== 0) {
+  console.error(pages.stderr);
+  console.error('\nStopped at step 3. The new key above is live on the Worker and set for Pages. Fix the error and run the same command again.');
   process.exit(1);
 }
-const list = () => {
-  const out = spawnSync(`npx wrangler pages deployment list --project-name ${PROJECT} --json`, { shell: true, encoding: 'utf8' }).stdout;
-  return JSON.parse(out.slice(out.indexOf('[')));
-};
-const others = list().filter((d) => dry || !d.Id.startsWith(fresh));
-const old = others.filter((d) => d.Environment === 'Production' && d.Branch === 'main');
-for (const d of others.filter((d) => !old.includes(d))) console.log(`     left alone, look at it yourself: ${d.Deployment} (${d.Environment}, branch ${d.Branch})`);
-for (const d of old) {
-  console.log(`     ${dry ? 'would delete' : 'deleting'} ${d.Deployment} (production build of main from ${d.Source}, ${d.Status})`);
-  if (!dry) spawnSync(`npx wrangler pages deployment delete ${d.Id} --project-name ${PROJECT} --force`, { shell: true, encoding: 'utf8' });
+
+if (dry) {
+  console.log('\nNothing was changed. Run it again without --dry-run to do it.');
+} else if (which === 'admin') {
+  console.log('\nThe admin address moved because it is worked out from the key. Your old bookmark now says "Not found".');
+  console.log('That is expected. Your links, emails and claims are exactly as they were.');
+  console.log('Log in at the new address with any username and the new password.');
+} else {
+  console.log('\nOpen the new display link on the desk laptop. Every screen that was signed in has been signed out.');
 }
-if (!old.length) console.log('     none to delete');
-if (!dry) {
-  const left = list();
-  const stuck = left.filter((d) => old.some((o) => o.Id === d.Id));
-  if (stuck.length || !left.some((d) => d.Id.startsWith(fresh))) {
-    console.error(`\nNot done. Still there: ${stuck.map((d) => d.Deployment).join(', ') || 'none'}. New build present: ${left.some((d) => d.Id.startsWith(fresh))}.`);
-    console.error('The new key above is already live. Look at the list before deleting anything by hand.');
-    process.exit(1);
-  }
-  console.log(`     checked: ${left.length} deployment left, the new one`);
-}
-if (dry) console.log('\nNothing was changed. Run it again without --dry-run to do it.');
