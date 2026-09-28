@@ -22,7 +22,8 @@ const admin = { Authorization: basic(ADMIN_KEY), Origin: BASE };
 // copy is empty. Empty alone is not enough: the live site is empty between two events. Both checks come before any
 // request that changes something, and a failed login stops it too.
 const local = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE);
-assert.ok(local || new URL(BASE).host === process.env.THROWAWAY, `${BASE} is not this machine. This suite only runs on a throwaway copy you name: THROWAWAY=${new URL(BASE).host}`);
+// https as well, because every admin request carries the key in its Authorization header.
+assert.ok(local || (new URL(BASE).protocol === 'https:' && new URL(BASE).host === process.env.THROWAWAY), `${BASE} is not this machine. This suite only runs on a throwaway copy over https that you name: THROWAWAY=${new URL(BASE).host}`);
 const firstFetch = await fetch(BASE + ADMIN, { headers: admin });
 assert.equal(firstFetch.status, 200, 'the admin key always opens the panel');
 const firstPanel = await firstFetch.text();
@@ -53,8 +54,10 @@ const claim = (token, email, cookie) => post('/' + token, new URLSearchParams({ 
 const status = async (path, headers = {}) => (await fetch(BASE + path, { headers, redirect: 'manual' })).status;
 const adminHtml = async (query = '') => (await fetch(BASE + ADMIN + query, { headers: admin })).text();
 
-// Claiming starts closed. Open it for the run; the switch itself is tested further down.
+// Claiming starts closed. Open it for the run; the switch itself is tested further down. The settings go back to their
+// starting values too: a run that died halfway (this one or load.mjs) can leave its own numbers behind.
 assert.equal((await post(ADMIN + '/open', new URLSearchParams({ open: '1' }), admin)).status, 303);
+assert.equal((await post(ADMIN + '/settings', new URLSearchParams({ rotate_seconds: '', ttl_seconds: '', max_claims_per_minute: '' }), admin)).status, 303);
 
 // ===== Attack surface =====
 

@@ -32,7 +32,8 @@ const counts = async () => (await call('admin', ADMIN, { headers: admin })).body
   .match(/<b>(\d+)<\/b> of <b>(\d+)<\/b> approved attendees claimed\. Credits left: <b>(\d+)<\/b>/)?.slice(1).map(Number);
 
 const local = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE);
-assert.ok(local || new URL(BASE).host === process.env.THROWAWAY, `${BASE} is not this machine. This test only runs on a throwaway copy you name: THROWAWAY=${new URL(BASE).host}`);
+// https as well, because every admin request carries the key in its Authorization header.
+assert.ok(local || (new URL(BASE).protocol === 'https:' && new URL(BASE).host === process.env.THROWAWAY), `${BASE} is not this machine. This test only runs on a throwaway copy over https that you name: THROWAWAY=${new URL(BASE).host}`);
 assert.deepEqual(await counts(), [0, 0, 0], `${BASE} is not empty (or the login failed). This test fills and empties the target, so it stops here.`);
 const panel = (await call('admin', ADMIN, { headers: admin })).body;
 const wasOpen = /Claiming is OPEN/.test(panel);
@@ -52,8 +53,14 @@ try {
   await setup('/settings', { rotate_seconds: '20', ttl_seconds: '600', max_claims_per_minute: String(BRAKE) });
   await setup('/open', { open: '1' });
 
-  // The display keeps polling once a second the whole time, like the real one.
-  poller = (async () => { while (polling) { await call('display', '/screen/current', { headers: screen }); await sleep(1000); } })();
+  // The display keeps polling once a second the whole time, like the real one. A poll that gets no answer is recorded
+  // as a display failure, never thrown: a rejected poller would end the run before the cleanup below.
+  poller = (async () => {
+    while (polling) {
+      await call('display', '/screen/current', { headers: screen }).catch(() => log.push({ kind: 'display', ms: 0, status: 'no answer' }));
+      await sleep(1000);
+    }
+  })();
 
   // The desk: people scan one after another, and every scan moves the screen on to a fresh code.
   let started = performance.now();
@@ -97,10 +104,17 @@ try {
 } finally {
   polling = false;
   await poller;
-  // Leave the target as found: empty, settings back to their starting values, the switch where it was.
-  await setup('/reset');
-  await setup('/settings', { rotate_seconds: '', ttl_seconds: '', max_claims_per_minute: '' });
-  await setup('/open', { open: wasOpen ? '1' : '0' });
+  // Leave the target empty, the settings back to their starting values and the switch where it was. It only ever runs
+  // on an empty throwaway, so there are no organizer settings on it to keep. A failed cleanup is reported on its own
+  // and never replaces the error that stopped the run, which is the one worth reading.
+  try {
+    await setup('/reset');
+    await setup('/settings', { rotate_seconds: '', ttl_seconds: '', max_claims_per_minute: '' });
+    await setup('/open', { open: wasOpen ? '1' : '0' });
+  } catch (cleanup) {
+    console.error(`Cleanup failed, so ${BASE} still holds the test data: ${cleanup.message}`);
+    process.exitCode = 1;
+  }
 }
 
 const pick = (sorted, p) => Math.round(sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]);
