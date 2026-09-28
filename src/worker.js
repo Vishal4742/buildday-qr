@@ -91,7 +91,7 @@ export default {
 export class Gate extends DurableObject {
   tokens = new Map(); // token -> { at, seen, tries }. Memory only: if the object restarts, people just scan again.
   recent = []; // when the last minute's successful claims happened
-  okLogin = ''; // the last Authorization header that checked out, so the slow password hash runs once and not per click
+  okLogin = ''; // the saved ID and password, as the last header that checked out, so the slow hash runs once and not per click
   cur = '';
   img = '';
 
@@ -136,7 +136,6 @@ export class Gate extends DurableObject {
     const ask = (status, text) => plain(text, status, { 'WWW-Authenticate': 'Basic realm="admin", charset="UTF-8"' });
     const encoded = header.match(/^Basic (.+)$/)?.[1];
     if (!encoded) return ask(401, 'Login required');
-    if (this.okLogin && (await same(header, this.okLogin))) return true;
 
     let id = '', password = '';
     try {
@@ -147,15 +146,17 @@ export class Gate extends DurableObject {
     } catch {
       return ask(401, 'Login required');
     }
-    if (this.env.ADMIN_KEY && (await same(password, this.env.ADMIN_KEY))) {
-      this.okLogin = header; // and deliberately nothing else: this branch must not depend on storage
-      return true;
-    }
+    if (this.env.ADMIN_KEY && (await same(password, this.env.ADMIN_KEY))) return true; // needs no storage and no cache
 
     const hash = this.kv('admin_hash');
+    // The lock comes before the remembered login. A lock that let the organizer's own logged-in browser through would
+    // let through anyone sending that same header: refused for every wrong password, let in with the right one, as fast
+    // as they can send them. So it locks every browser, and it answers 401, not 429, because only a 401 brings the
+    // browser's login box back, and that box is where the organizer types the admin key.
     if (hash && Date.now() < Number(this.kv('login_locked_until'))) {
-      return ask(429, 'Too many wrong passwords. Wait five minutes, or log in with the admin key as the password.');
+      return ask(401, 'Too many wrong passwords. Wait five minutes, or log in with the admin key as the password.');
     }
+    if (this.okLogin && (await same(header, this.okLogin))) return true;
     // Both comparisons always run, so a wrong ID and a wrong password take the same time.
     const idOk = hash ? await same(id, this.kv('admin_id')) : false;
     const passwordOk = hash ? await same(await slowHash(password, this.kv('admin_salt')), hash) : false;
@@ -529,7 +530,7 @@ export class Gate extends DurableObject {
         <input id="apw" name="password" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
         <label for="apw2">The same password again</label>
         <input id="apw2" name="again" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
-        <p class="dim">The address of this page stays the same. Forgot the password one day? The long admin key always works as the password, with any ID. Five wrong passwords lock the ID and password for five minutes. The admin key is never locked.</p>
+        <p class="dim">The address of this page stays the same. Forgot the password one day? The long admin key always works as the password, with any ID. Five wrong passwords lock the ID and password for five minutes, also in a browser that is already logged in with them. The admin key is never locked.</p>
         <p class="dim">Wrong logins since the last good one: <b>${Number(this.kv('login_failures')) || 0}</b>.${lockedUntil > Date.now() ? ` Your ID and password are locked until ${ist(lockedUntil)}.` : ''} A number that climbs while you are not typing means someone is guessing.</p>
         <button>Save login</button>
       </form>
