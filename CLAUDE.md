@@ -9,7 +9,7 @@ A check-in gate that hands out sponsor credits at a developer event (now Bhopal 
 ## Commands
 - Environment: `npm install`
 - Run: `npm run dev` (wrangler dev on port 8787, keys come from `.dev.vars`)
-- Tests: `npm test` in a second terminal while the dev server runs, about 10 seconds · lint/format: none configured · types: none, plain JavaScript
+- Tests: `npm test` in a second terminal while the dev server runs, about 10 seconds · lint: `npm run lint` (a syntax check with `node --check`; no formatter) · types: none, plain JavaScript
 - Deploy: `npm run deploy`, only after `npm test` exits 0. It updates both entrances: the Worker (owns the Durable Object) and the classic Pages project in `pages/` (the front door for a custom domain by CNAME). A change to the gate that reaches only one of them leaves stale gate code live on the other. After a security fix, also delete the older Pages deployments, which stay reachable at their hash URLs.
 - Private URLs: `node urls.mjs <site> <ADMIN_KEY> <DISPLAY_KEY>`
 - Change a key: `node rotate.mjs <admin|display> <site> [own-key] [--dry-run]`. Never by hand: Pages binds secrets at deploy time and old Pages deployments keep answering to the old key.

@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy && npm run deploy:pages",
     "deploy:pages": "cd pages && wrangler pages deploy --branch main --commit-dirty=true",
-    "test": "node test.mjs"
+    "test": "node test.mjs",
+    "lint": "node --check src/worker.js && node --check pages/site/_worker.js && node --check test.mjs && node --check load.mjs && node --check urls.mjs && node --check rotate.mjs"
   },
   "dependencies": {
     "qrcode-generator": "^2.0.4"
