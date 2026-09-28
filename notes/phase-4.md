@@ -42,3 +42,11 @@
 ## What the next phase needs
 - The organizer's calls on the live site: stop claiming, export the CSV, delete the data, change the password.
 - This branch pushed and a pull request opened for everything after PR #1.
+
+## Added later in the same phase: the next event
+- Next event: "Bhopal | Agent and Learn Workshop" (Luma, claude-8le5), 30 September 2026, 2 to 5 PM IST. `EVENT` now carries that exact title.
+- Both keys rotated for it with `rotate.mjs`. The new keys went into a file outside the repo and were never printed into the session.
+- `rotate.mjs` had two faults. It printed the new key only at the very end, so a failed step 4 lost a key that was already live; it now prints it first. Step 4 deleted every older Pages build with `--force`, unchecked. The first attempt to fix that removed `--force`, which made step 4 a silent no-op: without it wrangler asks "Are you sure?", takes "no" when nobody can answer, and exits 0. For about four minutes two old builds still accepted the old admin key, until the display rotation removed them. Step 4 now deletes only older builds of the production branch, names each first, and reads the list again afterwards; anything left over fails the script.
+- The old event's data, looked at before deleting: 456 approved emails, 0 claims, one credit link (platform.claude.com, 0 of 60 used). Nobody claimed through the gate on 20 September. Backed up to the organizer's Downloads folder (the claim-status CSV with all 456 rows, and the links with their capacities), then removed with "Delete everything". Before and after: 0/456/60 to 0/0/0, links 1 to 0. The organizer's own login, the settings (20/120/30), the display link and the closed switch were kept.
+- Verified live: the three deleted builds answer 404; `claim.withclaude.in`, `buildday-qr.pages.dev` and the workers.dev address all show the new title; the new admin key opens the panel there (401 without it); the new display link signs a screen in; the feed says closed, 0 approved.
+- Still to do before 30 September: load the Luma guest list and the credit links, change the organizer's own password (it was typed into a chat on 20 September), a dry run at the desk, and Start on the day. The 60 unused credits on the old link may still be valid; the link is in the backup.

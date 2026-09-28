@@ -63,8 +63,10 @@ if (which === 'admin' && !dry) {
   console.log('');
 }
 
-// Every deployment is named before it goes, and none is forced. Cloudflare refuses to delete one that still carries
-// an alias, and that refusal is a reason to stop and look, not something to override.
+// Only older builds of the production branch are deleted, each named first. The newest build carries the site's
+// addresses and is never touched. A build from any other branch may carry a preview alias, so it is left for a person
+// to look at. --force is needed: without it wrangler asks "Are you sure?", takes "no" when nobody can answer, and
+// still exits 0. That is also why the list is read again afterwards: a delete that did not happen must not pass.
 console.log(`${dry ? '[dry run] ' : ''}4/4  delete older Pages deployments, which still answer to the old key`);
 const fresh = dry ? '' : deployed.match(/https:\/\/([0-9a-f]{8})\./)?.[1];
 if (!dry && !fresh) {
@@ -72,18 +74,26 @@ if (!dry && !fresh) {
   console.error(`Delete the old ones yourself, after looking at them: npx wrangler pages deployment list --project-name ${PROJECT}`);
   process.exit(1);
 }
-const listed = spawnSync(`npx wrangler pages deployment list --project-name ${PROJECT} --json`, { shell: true, encoding: 'utf8' }).stdout;
-const old = JSON.parse(listed.slice(listed.indexOf('['))).filter((d) => dry || !d.Id.startsWith(fresh));
+const list = () => {
+  const out = spawnSync(`npx wrangler pages deployment list --project-name ${PROJECT} --json`, { shell: true, encoding: 'utf8' }).stdout;
+  return JSON.parse(out.slice(out.indexOf('[')));
+};
+const others = list().filter((d) => dry || !d.Id.startsWith(fresh));
+const old = others.filter((d) => d.Environment === 'Production' && d.Branch === 'main');
+for (const d of others.filter((d) => !old.includes(d))) console.log(`     left alone, look at it yourself: ${d.Deployment} (${d.Environment}, branch ${d.Branch})`);
 for (const d of old) {
-  console.log(`     ${dry ? 'would delete' : 'deleting'} ${d.Deployment} (${d.Environment}, built from ${d.Source}, ${d.Status})`);
-  if (dry) continue;
-  const done = spawnSync(`npx wrangler pages deployment delete ${d.Id} --project-name ${PROJECT}`, { shell: true, encoding: 'utf8' });
-  if (done.status !== 0) {
-    console.error(done.stdout, done.stderr);
-    console.error(`\nCloudflare refused to delete ${d.Deployment}, and it was not forced. The new key above is already live.`);
-    console.error('Find out why it was refused before deleting it by hand.');
-    process.exit(1);
-  }
+  console.log(`     ${dry ? 'would delete' : 'deleting'} ${d.Deployment} (production build of main from ${d.Source}, ${d.Status})`);
+  if (!dry) spawnSync(`npx wrangler pages deployment delete ${d.Id} --project-name ${PROJECT} --force`, { shell: true, encoding: 'utf8' });
 }
 if (!old.length) console.log('     none to delete');
+if (!dry) {
+  const left = list();
+  const stuck = left.filter((d) => old.some((o) => o.Id === d.Id));
+  if (stuck.length || !left.some((d) => d.Id.startsWith(fresh))) {
+    console.error(`\nNot done. Still there: ${stuck.map((d) => d.Deployment).join(', ') || 'none'}. New build present: ${left.some((d) => d.Id.startsWith(fresh))}.`);
+    console.error('The new key above is already live. Look at the list before deleting anything by hand.');
+    process.exit(1);
+  }
+  console.log(`     checked: ${left.length} deployment left, the new one`);
+}
 if (dry) console.log('\nNothing was changed. Run it again without --dry-run to do it.');
