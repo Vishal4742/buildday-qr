@@ -1,0 +1,44 @@
+# Phase 4 — the organizer's login, tested, and the lock it showed was open
+
+## What was built
+- `test.mjs`: the checks phase 3 left owed for the organizer's own login. The admin key works with any ID and is never locked. A saved ID and password work, and a wrong ID or password fails. Every save rule holds. A new login kills the old one at once, also in a browser still holding it. Five wrong passwords lock the saved login, also for a browser already logged in with it. A burst of twenty guesses gets exactly five tries. A new save lifts the lock, and "Delete everything" leaves the login alone. The suite now takes `ADMIN_KEY` and `DISPLAY_KEY` from the environment, refuses a non-local target that holds data, and makes fresh passwords on every run, because a password written in a public file must never work anywhere.
+- `src/worker.js` `login()`: the order is now admin key, lock, remembered login, slow hash. The remembered login `okLogin` only ever holds a saved ID and password. A lock answers 401 instead of 429.
+- `load.mjs`: 200 people at one desk display (see README, "Test").
+- Docs: README (the lock also stops a logged-in browser, press Cancel to read why; the ADMIN_PATH trade-off; the Security section no longer says the gate checks logins, and names the right log line), the CLAUDE.md convention line for `login()`, one sentence of panel text.
+
+## The bug
+`okLogin` was checked before the lock. Once the organizer had logged in with their own pair, a guesser who reached the admin area got a 429 for every wrong password during a lock and a 200 for the right one, with no slow hash and no counting. Five wrong tries opened up unlimited fast guessing. It mattered on the live site because ADMIN_PATH is set there to a short word, which makes the login and its lock the real defence.
+
+## Why this shape
+- The lock comes before the remembered login, so a lock locks every browser. It answers 401 because only a 401 brings the browser's Basic login box back, and that box is where the organizer types the admin key.
+- The cost, written down on purpose: whoever knows the ADMIN_PATH word can now lock the organizer's saved login, an open session included, for five minutes at a time. The admin key still works. A per-browser session cookie would avoid this. Not built: it was cut in phase 3 and the hole closes without it.
+- The security review claimed that concurrent guesses slip past the lock, because `login()` awaits the hash between the lock check and the count. Measured, not argued: bursts of 50 and 200 wrong guesses on the real Cloudflare runtime, the right password hidden in the middle, gave exactly 5 evaluated and every other answer "locked". workerd runs `crypto.subtle` without yielding to other requests. The burst test in `test.mjs` holds that, and mutant M12 (a real `await` in that spot) proves the test catches it. If it ever fails, check the lock again after the hashing, just before deciding.
+- Anything that writes ran on a throwaway copy, `buildday-staging`, with its own empty Durable Object and random keys, deleted afterwards. The live site only got read-only checks.
+- The commits stay local until the fix is live and the organizer says to push, because the repository is public and the commit messages describe the hole.
+
+## What was verified (real output)
+- RED: the final `test.mjs` against the old `worker.js`: exit 1 at "locked means locked, also for the right password in a logged-in browser", `actual: 200, expected: 401`. Every check before it passed.
+- GREEN: `npm test` exit 0, run many times, including twice in a row from the state the last run left, and once from a locked state.
+- Mutation checks, each killed at its own assertion, with a green run of the restored code between mutants and 0 `MUTANT` markers left: M1 no lock check, M2 remembered login before the lock, M10 lock after 50 and M11 lock answers 429 (all at "locked means locked"), M3 admin key obeys the lock ("the admin key is never locked"), M4 ignore the password, M5 ignore the ID, M6 password may equal the ID, M7 no mismatch check, M8 a new login keeps the old one remembered ("the old login is dead"), M9 Delete everything also deletes the login, M12 an `await` between the lock check and the count ("a burst of twenty guesses gets five tries").
+- Fresh-context reviews: code reviewer APPROVE (no critical, high or medium). verify-app PASS (two runs, about 10.5 s each). Security reviewer: the concurrency claim above (disproved by measurement), and a low one: the Origin check does not cover admin GETs. The same-origin policy keeps a hostile page from reading the answers. Left alone.
+- Staging, the real Cloudflare runtime:
+  - `test.mjs` exit 0 in 52 s.
+  - The non-local guard: with one attendee on staging, both scripts stopped with exit 1, and the attendee was still there.
+  - `load.mjs`, twice, both passed: 200 claims exactly once each, the 150 and 60 caps held, junk codes 410 x200, zero 5xx. Run 1: 200 scans one after another 72 s, the burst of 200 claims plus 200 junk 21.6 s, 170 second presses 16.8 s.
+  - Server-side timing from `wrangler tail` (sampled): a successful claim spent p50 12 ms, max 34 ms in the Durable Object, and p50 35 ms, max 57 ms in the gate including the object. Every captured request finished in under 0.2 s. The multi-second waits the client saw came from one laptop opening about 400 HTTPS connections at once over one home line.
+  - Real Chrome through the Chrome DevTools driver (Claude in Chrome was not connected in this session): the admin panel's forms (links, one attendee, settings) with the organizer's own login and 0 CSP violations. The display link signed a desk in and moved it to `/screen`, the QR drew at 328x328 and fit the window, the display cookie was not readable by script. The QR image decoded with jsQR to the live claim URL. A phone (390x844, touch) opened it, got the neutral refusal for an unlisted email, then claimed with the registered one typed in mixed case and landed on the credit link. The desk counter moved to "1 of 1" and the code changed. The same phone reopening its link got the same credit; a second phone got "Code expired". The organizer's own home page showed the QR, a stranger's showed the welcome line. The QR fit a phone screen in forced dark mode.
+- Local: `load.mjs` burst of 200 claims plus 200 junk in 2.6 s.
+- AgentShield: grade F. Its 92 criticals are the 92 `sha512` integrity hashes in `package-lock.json`. The rest are prompt-wording suggestions for the harness agent files and CLAUDE.md, and hook style. No finding in the app. The staging keys appear in none of the 52 repo files. The admin path word and password appear in no file and no commit.
+- Production: `npm test` exit 0, then `npm run deploy` exit 0. Worker `buildday` version c860e844 at 100%. Pages deployment 50fb3c29 built from 08ca175. The older Pages deployment c7b870a6 was deleted and its hash URL now answers 404. Read-only checks on both entrances passed: security headers, guessable paths 404 with no login prompt, forged cookie and forged internal headers 404, PUT 405, oversized claim 413, http to https 301. 400 read-only requests at once through `claim.withclaude.in`: 4.5 s, 0 server errors. The home page in a fresh Chrome: welcome line, no console errors.
+- Not checked before: `main.buildday-qr.pages.dev` answers 404 after the old deployment was deleted with `--force`. It is not one of the project's domains, and nothing uses it.
+
+## Open issues
+- Claiming is still OPEN on the live site: a made-up code gets "no longer valid", not "not started". The event is over.
+- The live site still holds the attendee list. README: export the CSV, then "Delete everything".
+- The organizer's password and the ADMIN_PATH word were typed into a chat session on event day. Change the password in the panel and consider dropping ADMIN_PATH.
+- The panel's wrong-login counter restarts at 0 at every lock, so it never shows more than 4. The "locked until" line is the signal.
+- At the shipped 30 claims a minute, a burst of 200 goes 30 through and 170 told to wait. At one desk that pace is never reached; for several desks on one display, raise it in the panel.
+
+## What the next phase needs
+- The organizer's calls on the live site: stop claiming, export the CSV, delete the data, change the password.
+- This branch pushed and a pull request opened for everything after PR #1.
