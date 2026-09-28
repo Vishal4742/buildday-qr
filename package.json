@@ -4,8 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "test": "node test.mjs"
+    "deploy": "wrangler deploy && npm run deploy:pages",
+    "deploy:pages": "node deploy-pages.mjs",
+    "test": "node test.mjs",
+    "lint": "node --check src/worker.js && node --check pages/site/_worker.js && node --check test.mjs && node --check load.mjs && node --check urls.mjs && node --check rotate.mjs && node --check deploy-pages.mjs && node --check guard.mjs"
   },
   "dependencies": {
     "qrcode-generator": "^2.0.4"

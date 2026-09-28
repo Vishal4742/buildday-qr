@@ -23,11 +23,57 @@ There is no `/admin`. The panel and the display link are private addresses worke
 
 The display has no password. Opening the display link signs that browser in for two weeks and moves it to `/screen`. So the link is the secret: send it to the check-in desk and nobody else. If it ever leaks, set a new `DISPLAY_KEY`. The old link dies and every signed-in screen is signed out.
 
+## Getting in, and changing a key
+
+Open your admin address, the one `urls.mjs` printed. The browser shows a login box. The first time, type anything as the username and your `ADMIN_KEY` as the password. There is no login page to find anywhere else, and that is on purpose.
+
+Then scroll to "Admin login" at the bottom of the panel and set your own ID and password. From then on you log in with those. Three things to know:
+
+- The address of the panel does not change when you change your ID or password.
+- The `ADMIN_KEY` keeps working as the password, with any ID. That is how you get back in if you forget yours, so nobody can lock you out.
+- Five wrong passwords lock the ID and password for five minutes, also in a browser that is already logged in with them. The login box then keeps coming back even for the right password. Press Cancel to read why, and log in with the `ADMIN_KEY` as the password: it is never locked. Your password is stored as a salted PBKDF2 hash, never as text.
+
+If the long random address is a nuisance, give the panel a second, memorable one: `npx wrangler secret put ADMIN_PATH`, and the same with `npx wrangler pages secret put ADMIN_PATH --project-name buildday-qr`, then `npm run deploy`. It is a secret, not a config value, so it never lands in a public repo. Be honest with yourself about the trade: a word someone can guess is not a secret, and from then on your password and its five-tries lock are what stands between an attendee and the panel. Whoever finds the word can also set that lock off on purpose, every five minutes, so keep the `ADMIN_KEY` where you can reach it. Pick a word that isn't your name, and a password that isn't a number people around you know.
+
+Everything you need on event day is in the panel, so you can run it from a phone: the Start / Stop switch for claiming, links and their capacities, attendees, your own login, a "Make a new display link" button that kills the old link and signs every screen out, the three tuning numbers, and a counter of wrong login attempts.
+
+The command line is only for the keys themselves, for example after the `ADMIN_KEY` has leaked. That one stays out of the panel on purpose: it is your way back in when everything stored has gone wrong, so it must not depend on anything stored. Run one command from the repo folder, in your own terminal:
+
+```
+node rotate.mjs admin https://claim.yourdomain.com       # new admin password
+node rotate.mjs display https://claim.yourdomain.com     # new display link
+```
+
+It makes a strong random key, or takes your own as a third argument if it is at least 16 characters. Add `--dry-run` to see the plan first. The new key is printed once and kept nowhere, so save it.
+
+Two things surprise people. The admin address changes together with the password, because the address is worked out from the key. Your old bookmark will say "Not found", which is expected, and the command prints the new address to bookmark. And nothing else changes: links, emails and claims stay exactly as they were.
+
+Don't change a key with `wrangler secret put` by hand once the Pages front door exists. Pages keeps its own copy, only picks a new value up on its next deploy, and every older Pages deployment stays reachable at its own address with the old key still working. `rotate.mjs` sets both copies, redeploys, and deletes the older deployments.
+
 ## Your own domain
 
-Worth doing for three reasons. Attendees see your name instead of `workers.dev`. Some Indian mobile networks have blocked `workers.dev` addresses in the past. And a domain puts Cloudflare's firewall in front of the Worker, which a `workers.dev` address can't have.
+Worth doing for two reasons. Attendees see your name instead of `workers.dev` when their camera reads the code, and developers notice that. And some Indian mobile networks have blocked `workers.dev` addresses in the past.
 
-The domain has to be in your Cloudflare account. If you bought it somewhere else (GoDaddy, Hostinger, Namecheap, BigRock), move its nameservers over first. It's free and you keep the domain where it is.
+There are two ways to get there. Pick by how busy your domain already is.
+
+### The quick way: one CNAME record, wherever your DNS lives
+
+Use this if your domain already runs mail or other sites and you don't want to touch any of that. Your DNS stays at Spaceship, GoDaddy, Hostinger or wherever it is.
+
+Cloudflare Workers only accept domains that Cloudflare manages. Cloudflare Pages accepts a subdomain from any DNS provider. So the repo ships a second front door in `pages/`. It is the same gate code and it talks to the same Durable Object, so both entrances share one set of data.
+
+1. Create the Pages project once: `npx wrangler pages project create buildday-qr --production-branch main --force`. Run it from an empty folder, not from this repo. Without `--force`, current wrangler versions turn this command into "deploy the current folder as a new Worker", which is not what you want. The flag is only needed this one time.
+2. Give it the same two keys: `npx wrangler pages secret put ADMIN_KEY --project-name buildday-qr`, and the same for `DISPLAY_KEY`.
+3. `npm run deploy` now updates both entrances, the Worker first because it owns the data.
+4. In the Cloudflare dashboard open Workers & Pages, `buildday-qr`, Custom domains, "Set up a custom domain". Type the address you want, for example `claim.yourdomain.com`. Do this before the next step. Cloudflare says a CNAME added first will not resolve.
+5. At your DNS provider add a CNAME record. Host: `claim`. Value: `buildday-qr.pages.dev`. If you added this record before step 4, nothing is lost. It just won't resolve until step 4 is done.
+6. Wait for the dashboard to show the domain as active, usually a few minutes. Then run `node urls.mjs https://claim.yourdomain.com <ADMIN_KEY> <DISPLAY_KEY>` for your new admin address and display link. Only the front part changes.
+
+Three things to know. Every key now lives in two places, so change keys with `node rotate.mjs` and not by hand (see "Getting in, and changing a key"). Pages keeps every old deployment reachable at its own `<hash>.buildday-qr.pages.dev` address, with the gate code and keys it was deployed with. So `npm run deploy` deletes the older builds after every Pages deploy: only older builds of the production branch, each one named first, and it reads the list again afterwards to prove they are gone. And this route gives you no Cloudflare firewall rule, because that needs the whole domain on Cloudflare. Classic Pages is also the older of Cloudflare's two platforms, so treat this as the route for the event and look at the next one afterwards.
+
+### The thorough way: move the domain's nameservers to Cloudflare
+
+This puts Cloudflare's firewall in front and lets you turn the `workers.dev` address off. It also touches the DNS for everything else on the domain, so don't start it right before an event. It's free and you keep the domain where it is.
 
 1. In the Cloudflare dashboard choose "Add a domain", type your domain, and pick the Free plan.
 2. Cloudflare copies your existing DNS records. Stop and check them if the domain already runs a website or email. Every record on your registrar's DNS page should be in Cloudflare's list, the MX records for mail above all. Add any that are missing. Skipping this is how people break their email.
@@ -90,13 +136,13 @@ Your attendees are developers, so assume every one of them opens dev tools and t
 
 Nothing to look at in the browser. The claim page is a plain HTML form. Whether a code is live, whether an email is approved, who gets which credit: all of it is decided on the server. No keys, no logic and no other attendee's data ever reach a phone.
 
-No admin page to find. `/admin`, `/login`, `/api` and every other guess return the same 404 with no login prompt. The real addresses are 80 random-looking bits derived from your keys. Behind them sits the key itself, 100 bits, compared in constant time. Guessing is not a plan, and wrong keys are logged: run `npx wrangler tail` during the event and you'll see `wrong admin key from <ip>` if someone found the address and is trying.
+No admin page to find. `/admin`, `/login`, `/api` and every other guess return the same 404 with no login prompt. The real addresses are 80 random-looking bits derived from your keys. Behind them sits the key itself, 100 bits, compared in constant time. Guessing is not a plan, and wrong logins are logged: run `npx wrangler tail` during the event and you'll see `wrong admin login from <ip>` if someone found the address and is trying.
 
 The desk laptop is not an admin. It holds a display cookie, which opens the QR and a live counter, and nothing else. Someone who opens a new tab on it while your volunteer looks away finds no admin panel, because that machine never had the admin key. This is the most realistic attack at a desk, which is why the two are separate.
 
 The display has no password, by choice, so think about what its link is worth. The address bar on the desk only ever shows `/screen`, which is a 404 for every browser without the cookie, so a photo of the screen gives nothing away. The cookie is HttpOnly, so page scripts can't read it. If the private link itself leaks, the holder can watch live codes from anywhere. That removes the "you have to be at the desk" rule for them, and nothing more: a code still needs an approved, unused email, and claims still can't pass the size of your list. Setting a new `DISPLAY_KEY` ends it.
 
-Two layers. The Worker facing the internet holds no data. It turns away wrong paths, wrong methods (only GET and POST exist), oversized bodies (counted as they arrive, 10 KB for a claim) and failed logins by itself. The Durable Object with your links and emails has no public address at all. It can only be called by that Worker, which builds the internal request from scratch, so a forged `X-Role: admin` header from outside goes nowhere.
+Two layers. The Worker facing the internet holds no data. It turns away wrong paths, wrong methods (only GET and POST exist), oversized bodies (counted as they arrive, 10 KB for a claim) and cross-site posts by itself. The Durable Object with your links and emails has no public address at all, and it checks the admin login on every request, because your own ID and password are stored there. It can only be called by that Worker, which builds the internal request from scratch, so a forged `X-Role: admin` header from outside goes nowhere.
 
 Injection. Every SQL statement binds its values, so an email like `' OR '1'='1` is just a wrong email. Everything printed into a page is escaped. Behind that sits a Content-Security-Policy with a fresh random nonce per response, so even a missed escape could not run a script. There are no inline event handlers and no third-party scripts or CDNs. Pages can't be framed. A hostile website can't make your logged-in browser post to the admin panel, because the Origin is checked. The CSV export defuses cells that Excel would run as formulas. The claim cookie is `__Host-` prefixed, HttpOnly and Secure.
 
@@ -135,12 +181,17 @@ The display polls once a second, roughly 3,600 requests per hour. Close the disp
 ```
 npm run dev     # terminal 1
 npm test        # terminal 2, about 10 seconds
+node load.mjs   # terminal 2, 200 people at one desk
 ```
+
+`node load.mjs` fills the target with test data and empties it again, and `npm test` also replaces the saved login and the display link and opens claiming. So anywhere but your own machine both run only on a copy you name on purpose, and only while it is empty. Never point them at the live site, not even when it is empty between two events: they refuse the site's own addresses outright, read from the two `wrangler.toml` files, even when named as the throwaway. To try the real Cloudflare runtime, deploy a throwaway copy under another name and pass `BASE`, `ADMIN_KEY`, `DISPLAY_KEY` and `THROWAWAY` set to that copy's host. It queues 200 people through one display, each scan getting its own code, then has everyone press Claim at the same moment while made-up codes flood in. The brake lets 30 through and tells the rest to wait without burning their code; after the brake is raised in the panel they all get through. At the end it checks the record: everyone claimed exactly once, no link went past its limit, no server errors.
 
 Attack surface: guessable paths all 404 even with the real key and forged internal headers, the display link signs in without a password prompt, `/screen` is a 404 without the right cookie, a signed-in screen reaches nothing but the QR and can't open the admin panel, cross-site POSTs are refused, other HTTP methods are refused, oversized bodies are cut off, and every page carries the security headers with a nonce that changes per response.
 
 Claim flow: email extraction from a messy paste, unapproved emails refused, identical wording for "not approved" and "already claimed", script and SQL shaped input coming back inert, one claim per email, one credit per phone, single-use codes, the five-wrong-guesses limit, the screen moving on when a code is opened, sold out, expiry, and "Clear claims only" keeping links and emails.
 
 Abuse: a 250 KB hostile import has to finish in under two seconds on the server and one in the admin page, and claims past `MAX_CLAIMS_PER_MINUTE` are refused without using anything up.
+
+Admin login: the admin key works with any ID and is never locked. A saved ID and password work, and a wrong one of either is refused. The save rules hold (length, no space or colon in the ID, a password that differs from the ID and is typed the same twice). A new login kills the old one at once, also in a browser still logged in with it. Five wrong passwords lock the saved login, again also in a logged-in browser, with a 401 so the login box comes back for the admin key. A new save lifts the lock, and "Delete everything" leaves the login alone.
 
 Admin panel: editing a link moves its holder, junk and duplicate edits are refused, deleting a link releases its claims, stored markup shows up escaped, no inline handlers, only unclaimed emails can be removed, and the CSV export defuses formula-shaped cells. The Excel reader is tested by pulling the script out of the served admin page and running it on the two files in `fixtures/`, one written by Excel and one by openpyxl.

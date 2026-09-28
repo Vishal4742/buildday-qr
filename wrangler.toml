@@ -14,6 +14,10 @@ ROTATE_SECONDS = 20         # the QR swaps this often even when nobody scans it
 TTL_SECONDS = 120           # a code dies this long after it first appeared; has to cover scanning plus typing an email on a phone
 MAX_CLAIMS_PER_MINUTE = 30  # a desk manages about ten. Faster than this is a script working through other people's emails
 
+# Tells the code which deployed version it is. The display uses it to reload itself after a deploy.
+[version_metadata]
+binding = "VERSION"
+
 [[durable_objects.bindings]]
 name = "GATE"
 class_name = "Gate"

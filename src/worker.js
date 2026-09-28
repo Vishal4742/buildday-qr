@@ -1,14 +1,16 @@
 import { DurableObject } from 'cloudflare:workers';
 import qrcode from 'qrcode-generator';
 
-const EVENT = 'Fable 5.1 Build Day · Bhopal';
+const EVENT = 'Bhopal | Agent and Learn Workshop';
 const MAX_TRIES = 5; // wrong emails one scanned code will take before it dies. A brake per code, not a rate limit: scan() has that
 const PATH_LEN = 20; // hex characters in the secret admin and display paths, 80 bits
+// What the panel's settings form will accept. Outside these, a saved value is ignored and the starting value is used.
+const LIMITS = { rotate_seconds: [5, 600], ttl_seconds: [20, 1800], max_claims_per_minute: [1, 10000] };
 // One answer for "not approved" and "already claimed", so a refusal tells a guesser nothing about who is on the list.
 const REFUSED = 'That email can\'t be used to claim. Check the spelling and use the one you registered with, or talk to an organizer.';
 
 // Two layers. This stateless Worker is the only thing the internet can reach. Whatever needs no data (wrong paths,
-// wrong methods, oversized bodies, failed logins) it answers by itself, so junk never reaches the Durable Object
+// wrong methods, oversized bodies, cross-site posts) it answers by itself, so junk never reaches the Durable Object
 // behind it, which is single-threaded and holds all the state. Every decision about a claim is made back there.
 // ponytail: one object for the whole event, fine for hundreds of scans a minute. Shard per desk if that ever isn't enough.
 // ponytail: no per-IP rate limit on purpose. At a venue everyone shares one Wi-Fi address, so a limit would let one
@@ -21,41 +23,46 @@ export default {
     }
     if (req.method !== 'GET' && req.method !== 'POST') return plain('Method not allowed', 405, { Allow: 'GET, POST' });
     const post = req.method === 'POST';
-    if (url.pathname === '/' && !post) return page('Welcome', '<p>Scan the QR code at the check-in desk to claim your credits.</p>');
+    // The home page. For a screen that has signed in through the display link it IS the QR display, because an
+    // organizer opens their own site and expects to see the code there. For everybody else it is a line of text.
+    const home = url.pathname === '/' && !post;
 
     // The admin panel and the display link live under unguessable paths derived from their keys. Every other path,
     // /admin and /login included, gets the same 404, so there is no login page to find, let alone attack.
     const [, seg, ...rest] = url.pathname.split('/');
     const sub = rest.length ? `/${rest.join('/')}` : '';
     let role = '';
-    if (/^[a-z2-7]{8}$/.test(seg) && !sub) role = 'public';
-    else if (seg === 'screen') {
+    let token = ''; // the panel-managed half of the display credential, when the request carries one
+    // ADMIN_PATH is an optional, memorable second address for the admin panel, kept as a secret so it never lands in a
+    // public repo. It is checked before the claim-code pattern, because an eight-letter word looks exactly like a code.
+    // It is only as private as it is hard to guess, so with one set, the login and its lockout carry the weight.
+    const custom = /^[\w-]{4,64}$/.test(env.ADMIN_PATH ?? '') && env.ADMIN_PATH !== 'screen' ? env.ADMIN_PATH : '';
+    if (custom && env.ADMIN_KEY && seg.length === custom.length && (await same(seg, custom))) role = 'admin';
+    else if (/^[a-z2-7]{8}$/.test(seg) && !sub) role = 'public';
+    else if (seg === 'screen' || home) {
       // The QR display has no password. The desk laptop proves itself with a cookie it got from the private display
       // link, so a volunteer types nothing and the address bar, which attendees will photograph along with the QR,
       // only ever says /screen. Without the cookie this is one more 404.
-      const cookie = req.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-screen=([0-9a-f]{64})(?:;|$)/)?.[1];
-      if (cookie && env.DISPLAY_KEY && (await same(cookie, await screenCookie(env.DISPLAY_KEY)))) role = 'display';
+      // The cookie has two halves. The first is derived from DISPLAY_KEY and is checked right here, so junk still never
+      // reaches the object. The second is a token the object keeps, which the organizer can replace from the panel.
+      const cookie = req.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-screen=([0-9a-f]{64})(?:\.([a-z2-7]{16}))?(?:;|$)/);
+      if (cookie && env.DISPLAY_KEY && (await same(cookie[1], await screenCookie(env.DISPLAY_KEY)))) {
+        role = 'display';
+        token = cookie[2] ?? '';
+      }
     } else if (seg.length === PATH_LEN) {
       if (env.ADMIN_KEY && (await same(seg, await secretPath('admin', env.ADMIN_KEY)))) role = 'admin';
-      else if (!sub && !post && env.DISPLAY_KEY && (await same(seg, await secretPath('display', env.DISPLAY_KEY)))) {
-        // The private display link: signs this browser in and moves on, so the secret never sits on screen.
-        // Lax, not Strict, or a link tapped from chat or mail would arrive at /screen without its new cookie.
-        return new Response(null, { status: 303, headers: { ...NO_STORE, Location: `${url.origin}/screen`,
-          'Set-Cookie': `__Host-screen=${await screenCookie(env.DISPLAY_KEY)}; Path=/; Max-Age=1209600; HttpOnly; Secure; SameSite=Lax` } });
+      else if (!post && env.DISPLAY_KEY && /^(\/[a-z2-7]{16})?$/.test(sub) && (await same(seg, await secretPath('display', env.DISPLAY_KEY)))) {
+        role = 'signin'; // the private display link. The object checks the token half and hands out the cookie.
+        token = sub.slice(1);
       }
     }
-    if (!role) return notFound();
+    if (!role) return home ? welcome() : notFound();
 
-    if (role === 'admin') {
-      const given = basicPassword(req);
-      if (!(await same(given ?? '', env.ADMIN_KEY))) {
-        // Someone who knows the secret path but not the key is worth noticing. Shows up in `npx wrangler tail`.
-        if (given !== null) console.warn(`wrong admin key from ${req.headers.get('CF-Connecting-IP')}`);
-        return plain('Login required', 401, { 'WWW-Authenticate': 'Basic realm="admin", charset="UTF-8"' });
-      }
-      // The browser attaches Basic auth to cross-site form posts too, so a hostile page could otherwise reset the pool.
-      if (post && req.headers.get('Origin') !== url.origin) return plain('Bad origin', 403);
-    }
+    // Reaching the admin area is not being logged in. The object checks the ID and password on every admin request,
+    // because the organizer's own login is stored there. What the gate still owns is the cross-site check: the browser
+    // attaches Basic auth to cross-site form posts too, so a hostile page could otherwise reset the pool.
+    if (role === 'admin' && post && req.headers.get('Origin') !== url.origin) return plain('Bad origin', 403);
 
     // A claim posts one email address. Only the admin ever sends anything long.
     const body = post ? await readCapped(req.body, role === 'admin' ? 2_000_000 : 10_000) : undefined;
@@ -68,7 +75,15 @@ export default {
       method: req.method,
       body,
       redirect: 'manual', // hand the object's 303s back to the browser instead of chasing them in here
-      headers: { 'X-Role': role, 'X-Base': `/${seg}`, Cookie: req.headers.get('Cookie') ?? '' },
+      headers: {
+        'X-Role': role,
+        'X-Base': role === 'display' ? '/screen' : `/${seg}`, // the display always polls /screen/current, also when shown at /
+        'X-Home': home ? '1' : '',
+        'X-Ip': req.headers.get('CF-Connecting-IP') ?? '',
+        'X-Token': token,
+        Cookie: req.headers.get('Cookie') ?? '',
+        Authorization: role === 'admin' ? req.headers.get('Authorization') ?? '' : '', // the login only ever travels to the admin area
+      },
     }));
   },
 };
@@ -76,19 +91,105 @@ export default {
 export class Gate extends DurableObject {
   tokens = new Map(); // token -> { at, seen, tries }. Memory only: if the object restarts, people just scan again.
   recent = []; // when the last minute's successful claims happened
+  okLogin = ''; // the saved ID and password, as the last header that checked out, so the slow hash runs once and not per click
   cur = '';
-  svg = '';
+  img = '';
 
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.rotateMs = (Number(env.ROTATE_SECONDS) || 20) * 1000;
-    this.ttlMs = (Number(env.TTL_SECONDS) || 120) * 1000;
-    this.maxPerMinute = Number(env.MAX_CLAIMS_PER_MINUTE) || 30;
+    // wrangler.toml only gives the starting values. The organizer changes these from the panel, without a laptop.
+    this.defaults = { rotate_seconds: Number(env.ROTATE_SECONDS) || 20, ttl_seconds: Number(env.TTL_SECONDS) || 120, max_claims_per_minute: Number(env.MAX_CLAIMS_PER_MINUTE) || 30 };
     this.sql.exec('CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY, val TEXT UNIQUE NOT NULL, uses INTEGER NOT NULL DEFAULT 1)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS emails (email TEXT PRIMARY KEY)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS claims (cid TEXT PRIMARY KEY, link_id INTEGER NOT NULL, at INTEGER NOT NULL, email TEXT)');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS claims_email ON claims (email)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)'); // the organizer's own login and its lockout
+  }
+
+  kv(key) {
+    return this.sql.exec('SELECT value FROM kv WHERE key = ?', key).toArray()[0]?.value ?? '';
+  }
+
+  // A number the organizer set in the panel, or the starting value when the box was left empty.
+  setting(key) {
+    const [min, max] = LIMITS[key];
+    const saved = Number(this.kv(key));
+    return saved >= min && saved <= max ? saved : this.defaults[key];
+  }
+
+  get rotateMs() { return this.setting('rotate_seconds') * 1000; }
+  get ttlMs() { return this.setting('ttl_seconds') * 1000; }
+  get maxPerMinute() { return this.setting('max_claims_per_minute'); }
+
+  kvSet(key, value) {
+    this.sql.exec('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
+  }
+
+  // Returns true, or the response to send instead. Two ways in. The ADMIN_KEY always works as the password, with any
+  // ID: it is how the first login happens and how a forgotten password is recovered, and because it is checked first
+  // and needs nothing from storage, nothing that goes wrong further down can lock the organizer out. The second way is
+  // the ID and password the organizer set in the panel. That one is a human's password, so five wrong tries lock it
+  // for five minutes. The key is 100 random bits and needs no such brake.
+  async login(req) {
+    const header = req.headers.get('Authorization') ?? '';
+    const ask = (status, text) => plain(text, status, { 'WWW-Authenticate': 'Basic realm="admin", charset="UTF-8"' });
+    const encoded = header.match(/^Basic (.+)$/)?.[1];
+    if (!encoded) return ask(401, 'Login required');
+
+    let id = '', password = '';
+    try {
+      const text = atob(encoded);
+      const colon = text.indexOf(':');
+      id = colon < 0 ? '' : text.slice(0, colon);
+      password = text.slice(colon + 1);
+    } catch {
+      return ask(401, 'Login required');
+    }
+    if (this.env.ADMIN_KEY && (await same(password, this.env.ADMIN_KEY))) return true; // needs no storage and no cache
+
+    const hash = this.kv('admin_hash');
+    // The lock comes before the remembered login. A lock that let the organizer's own logged-in browser through would
+    // let through anyone sending that same header: refused for every wrong password, let in with the right one, as fast
+    // as they can send them. So it locks every browser, and it answers 401, not 429, because only a 401 brings the
+    // browser's login box back, and that box is where the organizer types the admin key.
+    if (hash && Date.now() < Number(this.kv('login_locked_until'))) {
+      return ask(401, 'Too many wrong passwords. Wait five minutes, or log in with the admin key as the password.');
+    }
+    if (this.okLogin && (await same(header, this.okLogin))) return true;
+    // Both comparisons always run, so a wrong ID and a wrong password take the same time.
+    const idOk = hash ? await same(id, this.kv('admin_id')) : false;
+    const passwordOk = hash ? await same(await slowHash(password, this.kv('admin_salt')), hash) : false;
+    if (idOk && passwordOk) {
+      this.okLogin = header;
+      this.kvSet('login_failures', 0);
+      return true;
+    }
+    // Someone who knows the secret path but not the login is worth noticing. Shows up in `npx wrangler tail`.
+    console.warn(`wrong admin login from ${req.headers.get('X-Ip')}`);
+    const failures = Number(this.kv('login_failures')) + 1;
+    this.kvSet('login_failures', failures >= 5 ? 0 : failures);
+    if (failures >= 5) this.kvSet('login_locked_until', Date.now() + 5 * 60_000);
+    return ask(401, 'Login required');
+  }
+
+  async setLogin(form) {
+    const id = String(form.get('id') ?? '').trim();
+    const password = String(form.get('password') ?? '');
+    // Plain ASCII only: the browser's login box and atob() disagree about anything else. No colon in the ID,
+    // because "id:password" is how the browser sends the pair.
+    if (!/^[\x21-\x39\x3b-\x7e]{3,40}$/.test(id)) return '?note=badid#account';
+    if (!/^[\x20-\x7e]{10,200}$/.test(password) || password === id) return '?note=badpw#account';
+    if (password !== String(form.get('again') ?? '')) return '?note=mismatch#account';
+    const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+    const hash = await slowHash(password, salt);
+    this.kvSet('admin_id', id);
+    this.kvSet('admin_salt', salt);
+    this.kvSet('admin_hash', hash);
+    this.kvSet('login_failures', 0);
+    this.kvSet('login_locked_until', 0);
+    this.okLogin = '';
+    return '?note=login#account';
   }
 
   async fetch(req) {
@@ -96,7 +197,7 @@ export class Gate extends DurableObject {
     const path = url.pathname;
     const post = req.method === 'POST';
     // A Durable Object has no public address. Only the Worker above can call this, and it builds these headers
-    // itself after checking the key, so they can be trusted. Every SQL statement below binds its values with ?.
+    // itself, so X-Role can be trusted to say which area was reached. Every SQL statement below binds its values with ?.
     const role = req.headers.get('X-Role');
     const base = req.headers.get('X-Base');
     // Read the body up front so that scan() never has to await.
@@ -107,14 +208,45 @@ export class Gate extends DurableObject {
       if (token) return this.scan(req, token, String(form.get('email') ?? '').trim().toLowerCase().slice(0, 254));
     }
 
+    if (role === 'signin' || role === 'display') {
+      // The gate has already checked the half that comes from DISPLAY_KEY. This is the half kept here, which the
+      // organizer can replace from the panel: a new one kills the old link and signs every screen out at once.
+      // Until they first do that there is no token, and the plain link and plain cookie are what match.
+      const want = this.kv('display_token');
+      // A screen whose link was replaced is a stranger again: a 404 at /screen, and the plain home page at /.
+      if (!(await same(req.headers.get('X-Token') ?? '', want))) return req.headers.get('X-Home') ? welcome() : notFound();
+      if (role === 'signin') {
+        // Signs this browser in and moves on, so the secret never sits in the address bar of a screen facing the room.
+        // Lax, not Strict, or a link tapped from chat or mail would arrive at /screen without its new cookie.
+        const value = (await screenCookie(this.env.DISPLAY_KEY)) + (want ? `.${want}` : '');
+        return new Response(null, { status: 303, headers: { ...NO_STORE, Location: `${url.origin}/screen`,
+          'Set-Cookie': setScreenCookie(value) } });
+      }
+    }
+
     if (role === 'display') {
       if (path === '/_display/current') return this.current(url);
       if (path === '/_display') return page('Scan to claim', (nonce) => displayPage(nonce, base), { admin: true });
     }
 
     if (role === 'admin') {
+      // X-Role: admin only says the request reached the admin area. Being logged in is decided here, every time.
+      const allowed = await this.login(req);
+      if (allowed !== true) return allowed;
       const back = (query = '') => Response.redirect(`${url.origin}${base}${query}`, 303);
       if (path === '/_admin/export.csv') return this.exportCsv();
+      if (post && path === '/_admin/login') return back(await this.setLogin(form));
+      if (post && path === '/_admin/display-link') {
+        this.kvSet('display_token', randomWord(16));
+        return back('?note=newlink#display');
+      }
+      if (post && path === '/_admin/settings') return back(this.saveSettings(form));
+      if (post && path === '/_admin/open') {
+        const open = form.get('open') === '1';
+        this.kvSet('claims_open', open ? '1' : '');
+        if (!open) this.tokens.clear(); // codes already sitting on phones die with the switch
+        return back();
+      }
       if (post && path === '/_admin') return back(this.addLinks(form));
       if (post && path === '/_admin/link') return back(this.editLink(form));
       if (post && path === '/_admin/emails') return back(this.addEmails(form));
@@ -145,6 +277,9 @@ export class Gate extends DurableObject {
     const cid = req.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-cid=([0-9a-f-]{36})(?:;|$)/)?.[1] || crypto.randomUUID();
     const mine = this.sql.exec('SELECT l.val FROM claims c JOIN links l ON l.id = c.link_id WHERE c.cid = ?', cid).toArray()[0];
     if (mine) return deliver(mine.val, cid); // this phone already claimed: same link again, never a second one
+    // The organizer's master switch. Links and even the display link get passed around before an event, so nothing
+    // can be claimed until they press Start in the panel. People who already claimed still get their credit back above.
+    if (!this.open) return page('Not open yet', '<h2>Claiming has not started yet</h2><p>The organizers will open it soon. Scan the code on the screen once it appears.</p>', { status: 403 });
 
     const t = this.tokens.get(token);
     const dead = () => page('Code expired', '<h2>That code is no longer valid</h2><p>It was already used or it timed out. Scan the new one on the screen.</p>', { status: 410 });
@@ -184,7 +319,16 @@ export class Gate extends DurableObject {
     return deliver(link.val, cid);
   }
 
+  // Closed until the organizer presses Start. Stored, not in memory, so a restart can never reopen or close it.
+  get open() {
+    return this.kv('claims_open') === '1';
+  }
+
   current(url) {
+    // v is the deployed version. A display tab that was opened before a deploy keeps running the old page code and
+    // never refreshes by itself, so the page compares v on every poll and reloads when it changes.
+    const v = this.env.VERSION?.id ?? '';
+    if (!this.open) return Response.json({ v, open: false, ...this.stats() }, { headers: NO_STORE }); // no codes are made while closed
     const now = Date.now();
     const t = this.tokens.get(this.cur);
     // New code when the last one was claimed, opened by someone, or on screen long enough for a photo of it to travel.
@@ -195,10 +339,13 @@ export class Gate extends DurableObject {
       const qr = qrcode(0, 'M');
       qr.addData(`${url.origin}/${this.cur}`);
       qr.make();
-      this.svg = qr.createSvgTag({ cellSize: 1, margin: 4, scalable: true, title: 'QR code to claim credits' });
+      // A real image, not an SVG. An SVG's black and white are only colours, and dark-mode extensions, forced dark
+      // themes and Windows high contrast repaint colours: the code was there and nobody could see it. They leave
+      // images alone. 8 px per module with a 4-module white border of its own, so it scans on any background.
+      this.img = qr.createDataURL(8, 32);
     }
-    const svg = url.searchParams.get('have') === this.cur ? undefined : this.svg;
-    return Response.json({ token: this.cur, svg, ...this.stats() }, { headers: NO_STORE });
+    const img = url.searchParams.get('have') === this.cur ? undefined : this.img;
+    return Response.json({ v, open: true, token: this.cur, img, ...this.stats() }, { headers: NO_STORE });
   }
 
   stats() {
@@ -239,11 +386,32 @@ export class Gate extends DurableObject {
     return `?note=saved#l${id}`;
   }
 
+  // An empty box means "back to the starting value". Anything out of range, or a code that would die before the
+  // screen has even moved on from it, is refused as a whole so the settings never end up half saved.
+  saveSettings(form) {
+    const next = {};
+    for (const key of Object.keys(LIMITS)) {
+      const text = String(form.get(key) ?? '').trim();
+      const value = Number(text);
+      const [min, max] = LIMITS[key];
+      if (text && !(Number.isInteger(value) && value >= min && value <= max)) return '?note=badsettings#settings';
+      next[key] = text ? value : '';
+    }
+    if ((next.ttl_seconds || this.defaults.ttl_seconds) <= (next.rotate_seconds || this.defaults.rotate_seconds)) return '?note=badsettings#settings';
+    for (const [key, value] of Object.entries(next)) {
+      if (value === '') this.sql.exec('DELETE FROM kv WHERE key = ?', key);
+      else this.kvSet(key, value);
+    }
+    return '?note=settings#settings';
+  }
+
   // Pulls addresses out of whatever gets pasted: one per line, a CSV export, "Name <email>", anything.
   addEmails(form) {
     const found = findEmails(String(form.get('emails') || ''));
+    const count = () => this.sql.exec('SELECT COUNT(*) AS n FROM emails').one().n;
+    const before = count();
     for (const email of found) this.sql.exec('INSERT OR IGNORE INTO emails (email) VALUES (?)', email);
-    return `?emails=${found.length}#people`;
+    return `?emails=${found.length}&fresh=${count() - before}#people`;
   }
 
   people() {
@@ -265,16 +433,26 @@ export class Gate extends DurableObject {
   async adminPage(url, base) {
     const { claimed, approved, remaining } = this.stats();
     const links = this.sql.exec('SELECT l.id, l.val, l.uses, (SELECT COUNT(*) FROM claims c WHERE c.link_id = l.id) AS used FROM links l ORDER BY l.id').toArray();
-    const display = this.env.DISPLAY_KEY ? `/${await secretPath('display', this.env.DISPLAY_KEY)}` : '';
+    const displayToken = this.kv('display_token');
+    const display = this.env.DISPLAY_KEY ? `/${await secretPath('display', this.env.DISPLAY_KEY)}${displayToken ? `/${displayToken}` : ''}` : '';
+    const lockedUntil = Number(this.kv('login_locked_until'));
     const n = (k) => parseInt(url.searchParams.get(k));
     // Only fixed strings and parsed numbers reach the page, never text from the query string. hasOwn, because a
     // plain lookup would happily return Object.prototype members for ?note=constructor.
     const notes = { saved: 'Link saved.', deleted: 'Link deleted.', removed: 'Email removed from the approved list.',
+      login: 'New login saved. If the browser asks you to log in again, use the new ID and password.',
+      newlink: 'New display link made. The old link is dead and every screen was signed out. Open the new link on the desk device.',
+      settings: 'Settings saved. They apply from the next code on.',
+      badsettings: 'Not saved: a number was out of range, or a code would die before the screen moves on. Keep "stays valid" larger than "changes every".',
+      badid: 'Not saved: the ID needs 3 to 40 letters, digits or symbols, with no spaces and no colon.',
+      badpw: 'Not saved: the password needs at least 10 characters, plain letters, digits and symbols, and must differ from the ID.',
+      mismatch: 'Not saved: the two passwords were not the same.',
       badlink: 'Not saved: that isn\'t a valid URL, or it is too long.',
       duplicate: 'Not saved: another line already has that exact link or code.' };
     const key = url.searchParams.get('note');
     const note = n('added') >= 0 ? `Saved ${n('added')} line(s)${n('skipped') > 0 ? `, skipped ${n('skipped')} that were too long or not valid URLs` : ''}.`
-      : n('emails') >= 0 ? `Saved. ${n('emails')} address(es) were in what you sent.`
+      : n('emails') === 0 ? 'Nothing added: no email address was found in what you sent.'
+      : n('emails') > 0 ? `Added ${n('fresh') || 0} new attendee(s). ${n('emails') - (n('fresh') || 0)} were already on the list.`
       : Object.hasOwn(notes, key) ? notes[key] : '';
     const ist = (ms) => new Date(ms).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
     const linkRow = (r) => r.id !== n('edit')
@@ -289,9 +467,17 @@ export class Gate extends DurableObject {
     : 'Delete this link? Nobody has claimed it yet.'}">Delete</button>
           <a href="${base}#links">cancel</a>
         </form></td></tr>`;
+    const open = this.open;
     return page('Admin', (nonce) => `<div class="admin">
+      <div class="switch ${open ? 'on' : 'off'}" role="status">
+        <p><b>Claiming is ${open ? 'OPEN' : 'CLOSED'}.</b> ${open ? 'The screen shows the QR code and approved people can claim.' : 'The screen shows no QR code and nobody can claim, whoever has the links. Press Start when the desk is ready.'}</p>
+        <form method="post" action="${base}/open">
+          <input type="hidden" name="open" value="${open ? '0' : '1'}">
+          <button class="${open ? 'danger' : 'go'}">${open ? 'Stop claiming' : 'Start claiming'}</button>
+        </form>
+      </div>
       <p><b>${claimed}</b> of <b>${approved}</b> approved attendees claimed. Credits left: <b>${remaining}</b>.
-      ${display ? `<a href="${display}">Open the QR display</a> <span class="dim">(no password: that private link signs a browser in, so only give it to the desk)</span>` : '<b>Set DISPLAY_KEY to get a QR display.</b>'}</p>
+      ${display ? `<a href="${display}">Open the QR display</a>` : '<b>Set DISPLAY_KEY to get a QR display.</b>'}</p>
       ${note && `<p class="note" role="status">${note}</p>`}
 
       <h2 id="links">Credit links</h2>
@@ -307,20 +493,66 @@ export class Gate extends DurableObject {
       <p class="dim">Editing a link also moves everyone who already got it: their short link sends them to the new value.</p>
 
       <h2 id="people">Approved attendees</h2>
-      <label for="file">Load the list from a file (.xlsx or .csv)</label>
-      <input type="file" id="file" accept=".xlsx,.csv,.txt">
-      <p id="filenote" class="dim" role="status">The file is read here in your browser and never uploaded. The addresses found in it land in the box below, and nothing is saved until you press the button.</p>
+      <p>Three ways to add people. Anyone you add can claim straight away.</p>
+
+      <h3>1. Add one attendee</h3>
+      <form method="post" action="${base}/emails" class="rowform">
+        <input id="one" name="emails" type="email" required maxlength="254" placeholder="name@example.com" aria-label="One attendee's email" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <button>Add attendee</button>
+      </form>
+
+      <h3>2. Add many: paste a list</h3>
       <form method="post" action="${base}/emails">
-        <label for="emails">Emails to approve</label>
+        <label for="emails">Any shape works: one per line, a CSV export, names mixed in. Only the addresses are kept.</label>
         <textarea id="emails" name="emails" rows="6" required></textarea>
-        <p class="dim">Or paste in any shape: one per line, a CSV export, names mixed in. Only the addresses are kept, and ones already on the list are skipped. For a walk-in, add their email here and they can claim right away.</p>
         <button>Save emails</button>
       </form>
+
+      <h3>3. Add from an Excel or CSV file</h3>
+      <label for="file">Choose a .xlsx or .csv file</label>
+      <input type="file" id="file" accept=".xlsx,.csv,.txt">
+      <p id="filenote" class="dim" role="status">The file is read here in your browser and never uploaded. The addresses found in it land in the box under option 2. Check them, then press "Save emails".</p>
       <p><a href="${base}/export.csv">Download the list with claim status</a> <span class="dim">(CSV, opens in Excel)</span></p>
+      <label for="find">Find an attendee</label>
+      <input id="find" type="search" placeholder="type any part of an email" autocomplete="off">
       <form method="post" action="${base}/email-remove">
-      <table><tr><th>Attendee</th><th>Got</th><th>At</th><th></th></tr>
-      ${this.people().map((r) => `<tr><td>${esc(r.email)}</td><td>${r.val ? esc(r.val) : '<span class="dim">not yet</span>'}</td><td>${r.at ? ist(r.at) : ''}</td>
+      <table id="people-table"><tr><th>Attendee</th><th>Got</th><th>At</th><th></th></tr>
+      ${this.people().map((r) => `<tr data-email="${esc(r.email)}"><td>${esc(r.email)}</td><td>${r.val ? esc(r.val) : '<span class="dim">not yet</span>'}</td><td>${r.at ? ist(r.at) : ''}</td>
         <td>${r.at ? '' : `<button class="link" name="email" value="${esc(r.email)}">remove</button>`}</td></tr>`).join('')}</table>
+      </form>
+
+      <h2 id="account">Admin login</h2>
+      <p>${this.kv('admin_hash') ? `Your ID is <b>${esc(this.kv('admin_id'))}</b>.` : 'No ID and password set yet. You are in with the admin key.'}</p>
+      <form method="post" action="${base}/login">
+        <label for="aid">New admin ID</label>
+        <input id="aid" name="id" required minlength="3" maxlength="40" autocomplete="username" autocapitalize="none" spellcheck="false">
+        <label for="apw">New password, 10 characters or more</label>
+        <input id="apw" name="password" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
+        <label for="apw2">The same password again</label>
+        <input id="apw2" name="again" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
+        <p class="dim">The address of this page stays the same. Forgot the password one day? The long admin key always works as the password, with any ID. Five wrong passwords lock the ID and password for five minutes, also in a browser that is already logged in with them. The admin key is never locked.</p>
+        <p class="dim">Wrong logins since the last good one: <b>${Number(this.kv('login_failures')) || 0}</b>.${lockedUntil > Date.now() ? ` Your ID and password are locked until ${ist(lockedUntil)}.` : ''} A number that climbs while you are not typing means someone is guessing.</p>
+        <button>Save login</button>
+      </form>
+
+      <h2 id="display">QR display</h2>
+      ${display ? `<label for="dlink">Display link. Open it on the desk device. It asks for no password, so give it to the desk and nobody else.</label>
+      <input id="dlink" readonly value="${esc(url.origin + display)}">
+      <form method="post" action="${base}/display-link" data-confirm="Make a new display link? The old link stops working and every screen signed in with it is signed out at once.">
+        <button class="danger">Make a new display link</button>
+      </form>
+      <p class="dim">Press this if the link has reached people who should not have it. Then open the new link on the desk device.</p>` : '<p>Set DISPLAY_KEY to get a QR display.</p>'}
+
+      <h2 id="settings">Settings</h2>
+      <form method="post" action="${base}/settings">
+        <label for="s1">The QR changes by itself every (seconds, ${LIMITS.rotate_seconds.join(' to ')})</label>
+        <input id="s1" name="rotate_seconds" type="number" min="${LIMITS.rotate_seconds[0]}" max="${LIMITS.rotate_seconds[1]}" value="${this.setting('rotate_seconds')}">
+        <label for="s2">A scanned code stays valid for (seconds, ${LIMITS.ttl_seconds.join(' to ')})</label>
+        <input id="s2" name="ttl_seconds" type="number" min="${LIMITS.ttl_seconds[0]}" max="${LIMITS.ttl_seconds[1]}" value="${this.setting('ttl_seconds')}">
+        <label for="s3">Most claims allowed in one minute (${LIMITS.max_claims_per_minute.join(' to ')})</label>
+        <input id="s3" name="max_claims_per_minute" type="number" min="${LIMITS.max_claims_per_minute[0]}" max="${LIMITS.max_claims_per_minute[1]}" value="${this.setting('max_claims_per_minute')}">
+        <p class="dim">If people keep seeing "That code is no longer valid", raise the second number. If honest people see "Too many claims right now", raise the third. Empty a box to go back to its starting value.</p>
+        <button>Save settings</button>
       </form>
 
       <h2>Danger zone</h2>
@@ -329,7 +561,13 @@ export class Gate extends DurableObject {
       </form>
       <form method="post" action="${base}/reset" data-confirm="Delete ALL links, ALL emails and ALL claim records?">
         <button class="danger">Delete everything</button>
-      </form></div>${adminScript(nonce)}`, { admin: true });
+      </form></div>${adminScript(nonce)}`, {
+      admin: true,
+      // Logging into the panel also signs this device in as a display. The organizer is allowed everything a display
+      // is, and it spares them the long display link on every new phone: log in here, and the home page shows the QR.
+      // It also keeps their own device signed in after they make a new display link.
+      headers: this.env.DISPLAY_KEY ? { 'Set-Cookie': setScreenCookie((await screenCookie(this.env.DISPLAY_KEY)) + (displayToken ? `.${displayToken}` : '')) } : {},
+    });
   }
 }
 
@@ -389,6 +627,10 @@ ${xlsxText}
 for (const el of document.querySelectorAll('[data-confirm]')) {
   el.addEventListener(el.tagName === 'FORM' ? 'submit' : 'click', (e) => { if (!confirm(el.dataset.confirm)) e.preventDefault(); });
 }
+document.getElementById('find').addEventListener('input', (e) => {
+  const wanted = e.target.value.trim().toLowerCase();
+  for (const row of document.querySelectorAll('#people-table tr[data-email]')) row.hidden = !row.dataset.email.includes(wanted);
+});
 document.getElementById('file').addEventListener('change', async (e) => {
   const file = e.target.files[0], note = document.getElementById('filenote');
   if (!file) return;
@@ -404,23 +646,35 @@ document.getElementById('file').addEventListener('change', async (e) => {
     found = [...new Set(findEmails(text))];
   } catch {}
   document.getElementById('emails').value = found.join('\\n');
-  note.textContent = found.length ? 'Found ' + found.length + ' address(es). Check them below, then press Save emails.'
+  note.textContent = found.length ? 'Found ' + found.length + ' address(es). They are in the box under option 2. Check them, then press Save emails.'
     : 'No email addresses found in that file. Save it as .xlsx or .csv and try again.';
+  if (found.length) document.getElementById('emails').scrollIntoView({ block: 'center' });
 });
 </script>`;
 
 const displayPage = (nonce, base) => `
 <style nonce="${nonce}">
-  #qr { width: min(72vmin, 600px); aspect-ratio: 1; margin: 0 auto; padding: 8px; border-radius: 16px; background: #fff; color: #111; display: grid; place-items: center; font-size: 1.3rem; transition: opacity .2s }
-  #qr svg { width: 100%; height: 100%; shape-rendering: crispEdges }
+  /* The whole code has to fit in the window with no scrolling: a QR with its bottom corner below the fold cannot be
+     scanned, which is exactly what happened on a 1536x864 laptop. So the box is sized from the window's HEIGHT, minus
+     what the text around it needs, and everything else on this page is kept tight. dvh where there is a phone toolbar. */
+  body { padding: 12px }
+  h1 { margin: 0 0 6px }
+  h2 { font-size: clamp(1.1rem, 3.4vh, 1.7rem); margin: 0 0 10px }
+  #stat { margin: 10px 0 4px }
+  .dim { margin: 0; font-size: .85rem }
+  #qr { width: min(calc(100vh - 215px), 94vw, 720px); width: min(calc(100dvh - 215px), 94vw, 720px); min-width: 180px; aspect-ratio: 1; margin: 0 auto; padding: 8px; border-radius: 16px; background: #fff; color: #111; display: grid; place-items: center; font-size: 1.3rem; transition: opacity .2s }
+  #qr img { width: 100%; height: 100%; image-rendering: pixelated; display: block }
 </style>
 <h2>Scan to claim your credits</h2>
 <div id="qr">Loading…</div>
+<noscript><p class="err">This page needs JavaScript to show the QR code. Turn it on for this site, or use another browser.</p></noscript>
 <p id="stat" aria-live="polite"></p>
 <p class="dim">One claim per registered email. The code changes every time someone scans it, so photos and screenshots of it are no use to anyone.</p>
 <script nonce="${nonce}">
   const qr = document.getElementById('qr'), stat = document.getElementById('stat');
+  const picture = Object.assign(new Image(), { alt: 'QR code to claim credits' });
   let have = '';
+  let version = '';
   const stayAwake = () => navigator.wakeLock?.request('screen').catch(() => {});
   document.addEventListener('visibilitychange', stayAwake);
   stayAwake();
@@ -429,14 +683,26 @@ const displayPage = (nonce, base) => `
   async function tick() {
     if (!document.hidden) try {
       // location.origin, not a relative URL: fetch() refuses relative URLs on a page opened as https://user:key@host/
-      const d = await (await fetch(location.origin + '${base}/current?have=' + have, { cache: 'no-store' })).json();
-      const blocked = !d.approved ? 'No approved emails loaded yet. Add them in the admin panel.'
+      const res = await fetch(location.origin + '${base}/current?have=' + have, { cache: 'no-store' });
+      // Say what is wrong in words. A blank box tells a volunteer nothing.
+      if (res.status === 404) { qr.textContent = 'This screen is signed out. Open your display link again.'; have = ''; stat.textContent = ''; setTimeout(tick, 3000); return; }
+      if (!res.ok) throw new Error('the server answered ' + res.status);
+      const d = await res.json();
+      // A new version was deployed while this tab was open: load the new page, or it would keep running old code.
+      if (version && d.v && d.v !== version) { location.reload(); return; }
+      version = d.v || version;
+      const blocked = d.open === false ? 'Claiming has not started yet. It opens from the admin panel.'
+        : !d.approved ? 'No approved emails loaded yet. Add them in the admin panel.'
         : !d.remaining ? (d.claimed ? 'All credits claimed' : 'No links loaded yet. Add them in the admin panel.') : '';
       if (blocked) { qr.textContent = blocked; have = ''; }
-      else if (d.svg) { qr.innerHTML = d.svg; have = d.token; }
+      else if (d.img) { picture.src = d.img; if (!picture.isConnected) { qr.textContent = ''; qr.append(picture); } have = d.token; }
       qr.style.opacity = 1;
       stat.textContent = d.claimed + ' of ' + d.approved + ' attendees claimed · ' + d.remaining + ' credits left';
-    } catch { qr.style.opacity = .15; stat.textContent = 'Connection lost, retrying…'; }
+    } catch (e) {
+      qr.style.opacity = .15;
+      stat.textContent = (/server answered/.test(String(e && e.message)) ? 'Problem: ' + e.message : 'No internet connection') + ', retrying…';
+      if (!have) qr.textContent = 'Waiting for a connection…';
+    }
     setTimeout(tick, 1000);
   }
   tick();
@@ -455,6 +721,12 @@ const CSS = `
   .code { font: 600 1.6rem ui-monospace, monospace; background: #fff; color: #111; padding: 16px; border-radius: 12px; word-break: break-all; user-select: all }
   button { font: inherit; font-weight: 600; padding: 16px 28px; border: 0; border-radius: 12px; background: #3d6df2; color: #fff; cursor: pointer }
   button.danger { background: #b3261e; margin-top: 32px }
+  button.go { background: #1f8a4c }
+  .switch { padding: 16px 18px; border-radius: 12px; margin-bottom: 20px }
+  .switch.on { background: #16301f }
+  .switch.off { background: #3a2a12 }
+  .switch p { margin: 0 0 12px }
+  .switch button { margin: 0 }
   label { display: block; margin: 16px 0 6px }
   textarea, input { width: 100%; font: 15px ui-monospace, monospace; padding: 10px; border-radius: 8px; border: 1px solid #444; background: #16161c; color: inherit }
   input[type=number] { max-width: 160px }
@@ -462,8 +734,10 @@ const CSS = `
   .admin { text-align: left }
   .admin form { margin-bottom: 8px }
   .admin h2 { font-size: 1.25rem; margin: 48px 0 4px; padding-top: 16px; border-top: 1px solid #2a2a33 }
+  .admin h3 { font-size: 1rem; margin: 28px 0 8px }
   .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
   .rowform input[name=val] { flex: 1 1 320px }
+  .rowform input[type=email] { flex: 1 1 240px; margin: 0; padding: 10px; text-align: left }
   .rowform button { padding: 8px 16px; margin: 0 }
   button.link { background: none; color: #8fb4ff; padding: 0; font-weight: 400; font-size: inherit; text-decoration: underline }
   input[type=file] { font: inherit; border-style: dashed }
@@ -476,6 +750,7 @@ const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).jo
 
 const NO_STORE = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex, nofollow' };
 const plain = (text, status, headers = {}) => new Response(text, { status, headers: { ...NO_STORE, ...headers } });
+const welcome = () => page('Welcome', '<p>Scan the QR code at the check-in desk to claim your credits.</p><p class="dim">Organizers: this page shows the QR code on any screen that has opened your display link once.</p>');
 const notFound = () => page('Not found', '<p>Nothing here. Scan the QR code at the check-in desk.</p>', { status: 404 });
 
 // `body` is a string, or a function of the nonce for pages that carry a script or an extra style block.
@@ -484,9 +759,12 @@ const notFound = () => page('Not found', '<p>Nothing here. Scan the QR code at t
 // no framing. form-action is left off the public pages because a claim ends in a redirect to the credit's own site.
 function page(title, body, { status = 200, headers = {}, admin = false } = {}) {
   const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
-  const csp = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'${admin ? "; form-action 'self'" : ''}`;
+  // img-src data: is for the QR code, which the display gets as an image inside the feed. Nothing is loaded from anywhere.
+  const csp = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'${admin ? "; form-action 'self'" : ''}`;
   return new Response(
-    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · ${esc(EVENT)}</title><style nonce="${nonce}">${CSS}</style><main><h1>${esc(EVENT)}</h1>${typeof body === 'function' ? body(nonce) : body}</main>`,
+    // color-scheme: the pages are dark already. Saying so stops phone browsers (Samsung Internet, Chrome's "dark theme
+    // for sites") from repainting them, which turns the white QR box dark and makes a black QR code invisible.
+    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>${esc(title)} · ${esc(EVENT)}</title><style nonce="${nonce}">${CSS}</style><main><h1>${esc(EVENT)}</h1>${typeof body === 'function' ? body(nonce) : body}</main>`,
     {
       status,
       headers: {
@@ -545,7 +823,8 @@ function cleanLink(line) {
 }
 
 // 32-letter alphabet so `byte & 31` picks evenly. 32^8 is about 10^12 guesses for a code that lives two minutes.
-const newToken = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
+const randomWord = (length) => [...crypto.getRandomValues(new Uint8Array(length))].map((b) => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
+const newToken = () => randomWord(8);
 
 const sha256 = async (s) => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
 // Hashing first makes both sides 32 bytes, which timingSafeEqual needs, and then the comparison takes the same time
@@ -555,12 +834,14 @@ const same = async (a, b) => crypto.subtle.timingSafeEqual(await sha256(a), awai
 const secretPath = async (label, key) => hex(await sha256(`${label}-path:${key}`)).slice(0, PATH_LEN);
 // What a signed-in display browser holds. Also derived from DISPLAY_KEY, so changing that key signs every screen out.
 const screenCookie = async (key) => hex(await sha256(`display-cookie:${key}`));
+const setScreenCookie = (value) => `__Host-screen=${value}; Path=/; Max-Age=1209600; HttpOnly; Secure; SameSite=Lax`;
 
-// null means no credentials were sent at all, so a first visit isn't logged as a failed attempt.
-function basicPassword(req) {
-  const b64 = req.headers.get('Authorization')?.match(/^Basic (.+)$/)?.[1];
-  if (!b64) return null;
-  try { return atob(b64).replace(/^[^:]*:/, ''); } catch { return ''; }
+// For the organizer's own password. It is a human's password, quite possibly one they use elsewhere, so it is stored
+// as PBKDF2 with 100,000 rounds (the most Workers allow) and a random salt, never as a fast hash.
+async function slowHash(password, saltHex) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const salt = Uint8Array.from(saltHex.match(/../g) ?? [], (pair) => parseInt(pair, 16));
+  return hex(new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100_000 }, key, 256)));
 }
 
 // Counts what actually arrives: Content-Length can be missing, and it can lie. null means over the limit.

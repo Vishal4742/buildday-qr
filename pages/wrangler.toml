@@ -1,0 +1,11 @@
+# The front door for your own domain. Cloudflare Pages accepts a subdomain from any DNS provider with one CNAME
+# record, which Workers do not. It runs the same gate code as the Worker and talks to the same Durable Object,
+# so both entrances share one set of data. Deploy the Worker first (it owns the object), then `npm run deploy:pages`.
+name = "buildday-qr"
+pages_build_output_dir = "./site"
+compatibility_date = "2025-09-01"
+
+[[durable_objects.bindings]]
+name = "GATE"
+class_name = "Gate"
+script_name = "buildday"
