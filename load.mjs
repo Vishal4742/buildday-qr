@@ -1,6 +1,7 @@
 // Load test: a crowd of PEOPLE (200 by default) claims at one desk display. Start `npm run dev` first, or pass BASE,
-// ADMIN_KEY and DISPLAY_KEY for a throwaway deployment. It fills the target with test data and empties it again, so it
-// refuses to start unless the target is empty. Never point it at the live site.
+// ADMIN_KEY, DISPLAY_KEY and THROWAWAY=<its host> for a throwaway deployment. It fills the target with test data and
+// empties it again, so anywhere but this machine it runs only on a copy named that way, and only while it is empty.
+// Empty alone is not enough: the live site is empty between two events. Never point it at the live site.
 // Prints latency and status counts per kind of request, and fails if any rule broke under load.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -30,6 +31,8 @@ const setup = async (path, fields = {}) => assert.equal((await call('admin', ADM
 const counts = async () => (await call('admin', ADMIN, { headers: admin })).body
   .match(/<b>(\d+)<\/b> of <b>(\d+)<\/b> approved attendees claimed\. Credits left: <b>(\d+)<\/b>/)?.slice(1).map(Number);
 
+const local = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE);
+assert.ok(local || new URL(BASE).host === process.env.THROWAWAY, `${BASE} is not this machine. This test only runs on a throwaway copy you name: THROWAWAY=${new URL(BASE).host}`);
 assert.deepEqual(await counts(), [0, 0, 0], `${BASE} is not empty (or the login failed). This test fills and empties the target, so it stops here.`);
 const panel = (await call('admin', ADMIN, { headers: admin })).body;
 const wasOpen = /Claiming is OPEN/.test(panel);

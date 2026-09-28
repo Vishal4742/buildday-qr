@@ -1,6 +1,7 @@
 // Start `npm run dev` in another terminal first, then `npm test`.
 // Relies on .dev.vars: ADMIN_KEY=dev, DISPLAY_KEY=devdisplay, ROTATE_SECONDS=2, TTL_SECONDS=6, MAX_CLAIMS_PER_MINUTE=6.
-// To test a throwaway deployment instead, give it those three numbers and pass BASE, ADMIN_KEY and DISPLAY_KEY.
+// To test a throwaway deployment instead, give it those three numbers and pass BASE, ADMIN_KEY, DISPLAY_KEY, and
+// THROWAWAY set to its host.
 // Takes about 10 seconds.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -16,12 +17,16 @@ const KEY_PATH = `/${secretPath('display', DISPLAY_KEY)}`;
 const basic = (key) => 'Basic ' + btoa('x:' + key);
 const admin = { Authorization: basic(ADMIN_KEY), Origin: BASE };
 
-// This suite deletes everything it touches. Anywhere but this machine it only runs on an instance that is empty, so
-// pointing it at the live site by mistake stops here instead of wiping the attendee list. A failed login stops it too.
+// This suite deletes everything it touches, and on the way it replaces the saved login and the display link and opens
+// claiming. Anywhere but this machine it runs only on a copy named on purpose, THROWAWAY=<its host>, and only while that
+// copy is empty. Empty alone is not enough: the live site is empty between two events. Both checks come before any
+// request that changes something, and a failed login stops it too.
+const local = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE);
+assert.ok(local || new URL(BASE).host === process.env.THROWAWAY, `${BASE} is not this machine. This suite only runs on a throwaway copy you name: THROWAWAY=${new URL(BASE).host}`);
 const firstFetch = await fetch(BASE + ADMIN, { headers: admin });
 assert.equal(firstFetch.status, 200, 'the admin key always opens the panel');
 const firstPanel = await firstFetch.text();
-if (!/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE)) {
+if (!local) {
   const counts = firstPanel.match(/<b>(\d+)<\/b> of <b>(\d+)<\/b> approved attendees claimed\. Credits left: <b>(\d+)<\/b>/)?.slice(1).map(Number);
   assert.deepEqual(counts, [0, 0, 0], `${BASE} is not empty (or the login failed). This suite deletes everything, so it stops here.`);
 }
