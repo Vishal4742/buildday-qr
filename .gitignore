@@ -4,3 +4,7 @@ node_modules
 
 .claude/worktrees/
 .env
+
+# A local Codex copy of the harness, kept out of the repo on purpose (CLAUDE.md is the only copy of the rules)
+.codex/
+AGENTS.md
