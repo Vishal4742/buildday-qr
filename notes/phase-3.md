@@ -16,7 +16,7 @@ A session-and-login-page redesign was planned and sent to the plan reviewer. The
 - NOT exercised anywhere: saving a login, logging in with it, and the lockout, end to end. If any of it fails, the admin key still opens the panel.
 
 ## Open issues
-- `test.mjs` does not cover `setLogin`, the custom login or the lockout yet. Add: save rules (short, mismatch, equals ID, bad ID), login with the new pair, the old pair failing after a change, five failures then 429 while the admin key still works, `Delete everything` leaving the login alone. Then the usual mutation checks.
+- Done in phase 4 (`notes/phase-4.md`), where a locked login answers 401, not 429. As written then: `test.mjs` does not cover `setLogin`, the custom login or the lockout yet. Add: save rules (short, mismatch, equals ID, bad ID), login with the new pair, the old pair failing after a change, five failures then 429 while the admin key still works, `Delete everything` leaving the login alone. Then the usual mutation checks.
 - The organizer's chosen password is weaker than the 100-bit key by nature. The secret path in front of it is what keeps guessing out of reach.
 
 ## What the next phase needs
