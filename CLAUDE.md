@@ -1,7 +1,7 @@
 # CLAUDE.md — buildday-qr
 
 ## What this is
-A check-in gate that hands out sponsor credits at a developer event (Fable 5.1 Build Day, Bhopal) to approved attendees only. A desk display shows a QR code that changes every time it is opened. Scanning it asks for the registered email, and an approved, unused email gets one credit link or code from a pool. The attendees are developers, so assume every one of them reads this repo and probes the live site. The constraint that shapes everything: it has to work on event day, run by volunteers, on the free or $5 Cloudflare plan, with no database to set up.
+A check-in gate that hands out sponsor credits at a developer event (now Bhopal | Agent and Learn Workshop, 30 September 2026; first run at Fable 5.1 Build Day, Bhopal) to approved attendees only. A desk display shows a QR code that changes every time it is opened. Scanning it asks for the registered email, and an approved, unused email gets one credit link or code from a pool. The attendees are developers, so assume every one of them reads this repo and probes the live site. The constraint that shapes everything: it has to work on event day, run by volunteers, on the free or $5 Cloudflare plan, with no database to set up.
 
 - Design / decisions: `README.md`, section "Security", and the comments in `src/worker.js` (each non-obvious line says why)
 - Build log: `notes/` (one file per phase, updated after every phase commit)

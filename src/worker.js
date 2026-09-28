@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import qrcode from 'qrcode-generator';
 
-const EVENT = 'Fable 5.1 Build Day · Bhopal';
+const EVENT = 'Bhopal | Agent and Learn Workshop';
 const MAX_TRIES = 5; // wrong emails one scanned code will take before it dies. A brake per code, not a rate limit: scan() has that
 const PATH_LEN = 20; // hex characters in the secret admin and display paths, 80 bits
 // What the panel's settings form will accept. Outside these, a saved value is ignored and the starting value is used.
