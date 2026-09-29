@@ -11,4 +11,4 @@ if (!site || !adminKey || !displayKey) {
 }
 const path = (label, key) => createHash('sha256').update(`${label}-path:${key}`).digest('hex').slice(0, 20);
 console.log('admin panel (password = ADMIN_KEY):', `${site.replace(/\/$/, '')}/${path('admin', adminKey)}`);
-console.log('display link (no password)        :', `${site.replace(/\/$/, '')}/${path('display', displayKey)}`);
+console.log('display link (asks for the display password if one is set in the panel):', `${site.replace(/\/$/, '')}/${path('display', displayKey)}`);

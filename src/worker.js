@@ -52,8 +52,8 @@ export default {
       }
     } else if (seg.length === PATH_LEN) {
       if (env.ADMIN_KEY && (await same(seg, await secretPath('admin', env.ADMIN_KEY)))) role = 'admin';
-      else if (!post && env.DISPLAY_KEY && /^(\/[a-z2-7]{16})?$/.test(sub) && (await same(seg, await secretPath('display', env.DISPLAY_KEY)))) {
-        role = 'signin'; // the private display link. The object checks the token half and hands out the cookie.
+      else if (env.DISPLAY_KEY && /^(\/[a-z2-7]{16})?$/.test(sub) && (await same(seg, await secretPath('display', env.DISPLAY_KEY)))) {
+        role = 'signin'; // the private display link. The object checks the token half, the display password if one is set, and hands out the cookie.
         token = sub.slice(1);
       }
     }
@@ -61,8 +61,9 @@ export default {
 
     // Reaching the admin area is not being logged in. The object checks the ID and password on every admin request,
     // because the organizer's own login is stored there. What the gate still owns is the cross-site check: the browser
-    // attaches Basic auth to cross-site form posts too, so a hostile page could otherwise reset the pool.
-    if (role === 'admin' && post && req.headers.get('Origin') !== url.origin) return plain('Bad origin', 403);
+    // attaches Basic auth to cross-site form posts too, so a hostile page could otherwise reset the pool. The display
+    // link's password form is posted as well, so it gets the same check.
+    if ((role === 'admin' || role === 'signin') && post && req.headers.get('Origin') !== url.origin) return plain('Bad origin', 403);
 
     // A claim posts one email address. Only the admin ever sends anything long.
     const body = post ? await readCapped(req.body, role === 'admin' ? 2_000_000 : 10_000) : undefined;
@@ -192,6 +193,39 @@ export class Gate extends DurableObject {
     return '?note=login#account';
   }
 
+  // The display password: once the organizer sets one, the display link asks for it before a screen gets its cookie.
+  // Five wrong tries lock the sign-in for five minutes; screens already signed in keep their QR.
+  // ponytail: the same lock as in login(), written out twice. Fold them into one helper when login() can be changed
+  // calmly, not the day before an event.
+  async displayPassword(password) {
+    if (Date.now() < Number(this.kv('display_locked_until'))) return 'locked';
+    if (await same(await slowHash(password, this.kv('display_salt')), this.kv('display_hash'))) {
+      this.kvSet('display_failures', 0);
+      return 'ok';
+    }
+    const failures = Number(this.kv('display_failures')) + 1;
+    this.kvSet('display_failures', failures >= 5 ? 0 : failures);
+    if (failures >= 5) this.kvSet('display_locked_until', Date.now() + 5 * 60_000);
+    return 'wrong';
+  }
+
+  async setDisplayPassword(form) {
+    if (form.get('do') === 'off') {
+      this.sql.exec('DELETE FROM kv WHERE key IN (?, ?, ?, ?)', 'display_hash', 'display_salt', 'display_failures', 'display_locked_until');
+      return '?note=displayoff#display';
+    }
+    const password = String(form.get('password') ?? '');
+    if (!/^[\x20-\x7e]{10,200}$/.test(password) || password !== String(form.get('again') ?? '')) return '?note=baddisplaypw#display';
+    const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+    this.kvSet('display_hash', await slowHash(password, salt));
+    this.kvSet('display_salt', salt);
+    this.kvSet('display_failures', 0);
+    this.kvSet('display_locked_until', 0);
+    // A password only helps if the link that worked without it stops working: a new link, and every screen signs in again.
+    this.kvSet('display_token', randomWord(16));
+    return '?note=displaypw#display';
+  }
+
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -216,6 +250,17 @@ export class Gate extends DurableObject {
       // A screen whose link was replaced is a stranger again: a 404 at /screen, and the plain home page at /.
       if (!(await same(req.headers.get('X-Token') ?? '', want))) return req.headers.get('X-Home') ? welcome() : notFound();
       if (role === 'signin') {
+        // With a display password set, the link alone signs nothing in: it shows a form, and only the password does,
+        // so a link that leaked is worth nothing by itself. Without one, opening the link signs in as it always did,
+        // and there is nothing to post.
+        if (this.kv('display_hash')) {
+          if (!post) return screenSignIn();
+          const verdict = await this.displayPassword(String(form.get('password') ?? ''));
+          if (verdict === 'locked') return screenSignIn('Too many wrong passwords. Wait five minutes, or ask the organizer to save the display password again.', 429);
+          if (verdict !== 'ok') return screenSignIn('That is not the display password.', 403);
+        } else if (post) {
+          return notFound();
+        }
         // Signs this browser in and moves on, so the secret never sits in the address bar of a screen facing the room.
         // Lax, not Strict, or a link tapped from chat or mail would arrive at /screen without its new cookie.
         const value = (await screenCookie(this.env.DISPLAY_KEY)) + (want ? `.${want}` : '');
@@ -240,6 +285,7 @@ export class Gate extends DurableObject {
         this.kvSet('display_token', randomWord(16));
         return back('?note=newlink#display');
       }
+      if (post && path === '/_admin/display-password') return back(await this.setDisplayPassword(form));
       if (post && path === '/_admin/settings') return back(this.saveSettings(form));
       if (post && path === '/_admin/open') {
         const open = form.get('open') === '1';
@@ -434,6 +480,7 @@ export class Gate extends DurableObject {
     const { claimed, approved, remaining } = this.stats();
     const links = this.sql.exec('SELECT l.id, l.val, l.uses, (SELECT COUNT(*) FROM claims c WHERE c.link_id = l.id) AS used FROM links l ORDER BY l.id').toArray();
     const displayToken = this.kv('display_token');
+    const displayPassword = Boolean(this.kv('display_hash'));
     const display = this.env.DISPLAY_KEY ? `/${await secretPath('display', this.env.DISPLAY_KEY)}${displayToken ? `/${displayToken}` : ''}` : '';
     const lockedUntil = Number(this.kv('login_locked_until'));
     const n = (k) => parseInt(url.searchParams.get(k));
@@ -442,6 +489,9 @@ export class Gate extends DurableObject {
     const notes = { saved: 'Link saved.', deleted: 'Link deleted.', removed: 'Email removed from the approved list.',
       login: 'New login saved. If the browser asks you to log in again, use the new ID and password.',
       newlink: 'New display link made. The old link is dead and every screen was signed out. Open the new link on the desk device.',
+      displaypw: 'Display password saved. The display link changed and every screen was signed out: open the new link on each screen and type the password there.',
+      displayoff: 'Display password turned off. The display link opens the QR without it.',
+      baddisplaypw: 'Not saved: the display password needs at least 10 plain letters, digits or symbols, typed the same twice.',
       settings: 'Settings saved. They apply from the next code on.',
       badsettings: 'Not saved: a number was out of range, or a code would die before the screen moves on. Keep "stays valid" larger than "changes every".',
       badid: 'Not saved: the ID needs 3 to 40 letters, digits or symbols, with no spaces and no colon.',
@@ -536,12 +586,27 @@ export class Gate extends DurableObject {
       </form>
 
       <h2 id="display">QR display</h2>
-      ${display ? `<label for="dlink">Display link. Open it on the desk device. It asks for no password, so give it to the desk and nobody else.</label>
+      ${display ? `<label for="dlink">Display link. Open it on the desk device. ${displayPassword ? 'It asks for the display password below before it shows the QR.' : 'It asks for no password, so give it to the desk and nobody else.'}</label>
       <input id="dlink" readonly value="${esc(url.origin + display)}">
       <form method="post" action="${base}/display-link" data-confirm="Make a new display link? The old link stops working and every screen signed in with it is signed out at once.">
         <button class="danger">Make a new display link</button>
       </form>
-      <p class="dim">Press this if the link has reached people who should not have it. Then open the new link on the desk device.</p>` : '<p>Set DISPLAY_KEY to get a QR display.</p>'}
+      <p class="dim">Press this if the link has reached people who should not have it. Then open the new link on the desk device.</p>
+      <h3>Display password</h3>
+      <p>Display password: <b>${displayPassword ? 'on' : 'off'}</b>. ${displayPassword
+    ? 'Opening the display link asks for it, once on each device. A screen never gets into this panel.'
+    : 'Set one and the display link asks for it before a device shows the QR, so a link that leaked is worth nothing by itself.'}</p>
+      <form method="post" action="${base}/display-password" data-confirm="Save this display password? The display link changes and every screen is signed out. Open the new link on each screen and type the password there.">
+        <label for="dpw">New display password, 10 characters or more</label>
+        <input id="dpw" name="password" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
+        <label for="dpw2">The same password again</label>
+        <input id="dpw2" name="again" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
+        <button>Save display password</button>
+      </form>
+      ${displayPassword ? `<form method="post" action="${base}/display-password" data-confirm="Turn the display password off? Anyone with the display link can then open the QR without it.">
+        <input type="hidden" name="do" value="off">
+        <button class="danger">Turn the display password off</button>
+      </form>` : ''}` : '<p>Set DISPLAY_KEY to get a QR display.</p>'}
 
       <h2 id="settings">Settings</h2>
       <form method="post" action="${base}/settings">
@@ -785,6 +850,18 @@ function page(title, body, { status = 200, headers = {}, admin = false } = {}) {
       },
     },
   );
+}
+
+// What the display link shows once the organizer has set a display password: one field, posted back to the same link.
+function screenSignIn(err = '', status = 200) {
+  return page('Screen sign-in', `<h2>Sign in this screen</h2>
+    ${err && `<p class="err" role="alert">${esc(err)}</p>`}
+    <form method="post">
+      <label for="password">Display password</label>
+      <input id="password" name="password" type="password" required autofocus autocomplete="current-password" maxlength="200">
+      <button>Show the QR on this screen</button>
+    </form>
+    <p class="dim">The organizers have this password. It is asked once on each device.</p>`, { status });
 }
 
 function claimForm(err = '', email = '') {
