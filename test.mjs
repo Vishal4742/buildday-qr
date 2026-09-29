@@ -38,8 +38,10 @@ const panelLink = (html) => new URL(html.match(/id="dlink" readonly value="([^"]
 const DISPLAY_LINK = panelLink(firstPanel);
 assert.ok(DISPLAY_LINK.startsWith(KEY_PATH), 'the first half of the display link still comes from DISPLAY_KEY');
 
-// The display has no password. Opening the private link signs the browser in with a cookie and moves it to /screen,
-// so the secret never sits in the address bar of a laptop that faces the room.
+// Without a display password, opening the private link signs the browser in with a cookie and moves it to /screen,
+// so the secret never sits in the address bar of a laptop that faces the room. A run that died halfway can leave a
+// display password behind, so it is turned off first; the password itself is tested further down.
+await fetch(BASE + ADMIN + '/display-password', { method: 'POST', headers: admin, body: new URLSearchParams({ do: 'off' }), redirect: 'manual' });
 const signIn = await fetch(BASE + DISPLAY_LINK, { redirect: 'manual' });
 assert.equal(signIn.status, 303);
 assert.equal(signIn.headers.get('Location'), BASE + '/screen');
@@ -79,7 +81,7 @@ assert.equal(await status(ADMIN + '/export.csv', screen), 401);
 assert.equal(await status('/screen', screen), 200);
 assert.equal(await status('/screen', { Cookie: `__Host-screen=${'0'.repeat(64)}` }), 404);
 assert.equal(await status('/screen/current', { Cookie: `__Host-screen=${'0'.repeat(64)}` }), 404);
-assert.equal((await post(DISPLAY_LINK, null)).status, 404, 'the sign-in link is GET only');
+assert.equal((await post(DISPLAY_LINK, null, { Origin: BASE })).status, 404, 'without a display password there is nothing to post to the link');
 // The home page IS the QR display for a signed-in screen, because an organizer opens their own site and expects the
 // code there. For a stranger, and for a forged cookie, it stays a line of text.
 const homeFor = async (headers) => (await fetch(BASE + '/', { headers })).text();
@@ -330,6 +332,52 @@ screen = { Cookie: resigned.headers.getSetCookie()[0].split(';')[0] };
 assert.match(screen.Cookie, /^__Host-screen=[0-9a-f]{64}\.[a-z2-7]{16}$/);
 assert.equal(await status('/screen', screen), 200);
 assert.equal((await post(ADMIN + '/display-link', null, { ...admin, Origin: 'https://evil.example' })).status, 403);
+
+// ===== A password on the display link =====
+// With a display password set, the link alone no longer signs a device in: it asks for the password first, so a link
+// that leaked is worth nothing without it. Saving one also makes a new link, which signs out every screen that got in
+// without it and kills the link that worked without it. A screen never gets anywhere near the admin panel.
+const saveDisplayPw = async (fields) => (await post(ADMIN + '/display-password', new URLSearchParams(fields), admin)).headers.get('Location');
+const displayPw = `display ${randomUUID()}`;
+assert.match(await saveDisplayPw({ password: 'too short', again: 'too short' }), /note=baddisplaypw#display$/);
+assert.match(await saveDisplayPw({ password: displayPw, again: `${displayPw}x` }), /note=baddisplaypw#display$/);
+assert.match(await adminHtml(), /Display password: <b>off<\/b>/, 'a refused save turns nothing on');
+const linkWithout = panelLink(await adminHtml());
+const screenWithout = screen;
+assert.match(await saveDisplayPw({ password: displayPw, again: displayPw }), /note=displaypw#display$/);
+assert.match(await adminHtml(), /Display password: <b>on<\/b>/);
+const pwLink = panelLink(await adminHtml());
+assert.notEqual(pwLink, linkWithout, 'a new display password makes a new link');
+assert.equal(await status(linkWithout), 404, 'the link from before the password is dead');
+assert.equal(await status('/screen', screenWithout), 404, 'a screen signed in without the password is signed out');
+const asked = await fetch(BASE + pwLink, { redirect: 'manual' });
+assert.equal(asked.status, 200, 'the link asks for the password');
+assert.equal(asked.headers.getSetCookie().length, 0, 'and signs nothing in by itself');
+assert.match(await asked.text(), /type="password"/);
+const signInWith = (password, headers = { Origin: BASE }) => post(pwLink, new URLSearchParams({ password }), headers);
+const wrongDisplayPw = await signInWith('not the display password');
+assert.equal(wrongDisplayPw.status, 403);
+assert.equal(wrongDisplayPw.headers.getSetCookie().length, 0, 'a wrong password signs nothing in');
+assert.equal((await signInWith(displayPw, { Origin: 'https://evil.example' })).status, 403, 'a hostile site cannot post it');
+const rightDisplayPw = await signInWith(displayPw);
+assert.equal(rightDisplayPw.status, 303, 'the right password signs the screen in');
+assert.equal(rightDisplayPw.headers.get('Location'), BASE + '/screen');
+screen = { Cookie: rightDisplayPw.headers.getSetCookie()[0].split(';')[0] };
+assert.equal(await status('/screen', screen), 200);
+assert.equal(await status(ADMIN, screen), 401, 'a screen is still no admin');
+// Five wrong passwords lock the sign-in for five minutes, the right one included. Screens already in keep their QR.
+for (let i = 1; i <= 5; i++) assert.equal((await signInWith(`wrong display password ${i}`)).status, 403, `wrong display password ${i}`);
+const lockedScreen = await signInWith(displayPw);
+assert.equal(lockedScreen.status, 429, 'locked means locked, also for the right password');
+assert.match(await lockedScreen.text(), /Too many wrong passwords/);
+assert.equal(await status('/screen', screen), 200, 'a screen already signed in keeps working');
+// Turning it off lets the link sign in by itself again, and lifts the lock.
+assert.match(await saveDisplayPw({ do: 'off' }), /note=displayoff#display$/);
+assert.match(await adminHtml(), /Display password: <b>off<\/b>/);
+const openAgain = await fetch(BASE + pwLink, { redirect: 'manual' });
+assert.equal(openAgain.status, 303, 'with the password off, the link signs in by itself again');
+screen = { Cookie: openAgain.headers.getSetCookie()[0].split(';')[0] };
+assert.equal((await post(ADMIN + '/display-password', new URLSearchParams({ do: 'off' }), { ...admin, Origin: 'https://evil.example' })).status, 403);
 
 // ===== The organizer's own login =====
 // Two ways in. The admin key, as the password with any ID, always works and is never locked: it is the way back in.
